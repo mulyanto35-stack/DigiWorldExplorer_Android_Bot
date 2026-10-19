@@ -21,28 +21,15 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
 
-      - name: Generate Gradle Wrapper & Build APK
+      - name: Build APK
         run: |
-          # Cari file build.gradle utama untuk menentukan lokasi proyek
-          BUILD_FILE=$(find . -name "build.gradle" -o -name "build.gradle.kts" | head -n 1)
+          # Jalankan kompilasi langsung dari root project
+          gradle assembleDebug --stacktrace --warning-mode none
           
-          if [ -z "$BUILD_FILE" ]; then
-            echo "Error: File build.gradle tidak ditemukan!"
-            exit 1
-          fi
-          
-          PROJECT_DIR=$(dirname "$BUILD_FILE")
-          cd "$PROJECT_DIR"
-          
-          # Buat file gradlew secara otomatis jika belum ada
-          gradle wrapper
-          chmod +x gradlew
-          
-          # Jalankan kompilasi APK
-          ./gradlew assembleDebug --stacktrace
-          
-          # Salin hasil APK
+          # Salin file APK hasil kompilasi
           mkdir -p $GITHUB_WORKSPACE/output_apk
           find . -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output_apk/ \;
 
