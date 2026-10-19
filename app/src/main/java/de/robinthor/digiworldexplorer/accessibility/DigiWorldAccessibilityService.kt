@@ -1,14 +1,25 @@
-package de.robinthor.digiworldexplorer.accessibility
+Package de.robinthor.digiworldexplorer.accessibility
 
 import de.robinthor.digiworldexplorer.R
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Context
+import android.content.Intent
 import android.graphics.*
 import android.graphics.drawable.ColorDrawable
+import android.os.Build
+import android.os.SystemClock
+import android.provider.Settings
 import android.view.*
 import android.view.accessibility.AccessibilityEvent
-import android.provider.Settings
+import android.view.accessibility.AccessibilityWindowInfo
+import androidx.core.app.NotificationCompat
+
 import de.robinthor.digiworldexplorer.input.SafeTapRandomizer
 import de.robinthor.digiworldexplorer.detection.Cell
 import de.robinthor.digiworldexplorer.detection.GridBounds
@@ -20,151 +31,417 @@ import de.robinthor.digiworldexplorer.capture.FrameGeometryRegistry
 import de.robinthor.digiworldexplorer.capture.GeometrySnapshot
 import de.robinthor.digiworldexplorer.capture.PixelRect
 import de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog
-import android.os.SystemClock
 
-class DigiWorldAccessibilityService:AccessibilityService(){
- @Volatile private var activePackage:String?=null
- private var overlay:GridOverlayView?=null
- private var quickControls:QuickControlOverlay?=null
- override fun onServiceConnected(){instance=this;de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.initialize(this);de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.record("SERVICE","accessibility connected");showOverlay();val prefs=getSharedPreferences("settings",MODE_PRIVATE);if(prefs.getBoolean("quick_overlay_enabled",false))setQuickControlsEnabled(true);setOverlayEnabled(AutomationState.overlayEnabled)}
- override fun onAccessibilityEvent(event:AccessibilityEvent?){event?.packageName?.toString()?.let{activePackage=it}}
- override fun onInterrupt()=Unit
- fun isGameForeground():Boolean {
-  // Overlay window events are not evidence that the underlying game lost foreground.
-  // Query the actual application window instead of trusting the last event's package.
-  val application = windows.firstOrNull { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }
-  val root = application?.root ?: rootInActiveWindow
-  val current = root?.packageName?.toString() ?: activePackage
-  @Suppress("DEPRECATION")
-  root?.recycle()
-  return current=="com.bandainamcoent.dgup_ww"
- }
- override fun onDestroy(){quickControls?.destroy();quickControls=null;removeOverlay();if(instance===this)instance=null;super.onDestroy()}
- fun gameWindowBounds():PixelRect? {
-  val window=windows.firstOrNull { it.type==android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }
-  val root=window?.root ?: rootInActiveWindow ?: return null
-  try {
-   if(root.packageName?.toString()!="com.bandainamcoent.dgup_ww")return null
-   val rect=Rect()
-   if(window!=null)window.getBoundsInScreen(rect) else root.getBoundsInScreen(rect)
-   return if(rect.width()>0 && rect.height()>0)PixelRect(rect.left,rect.top,rect.right,rect.bottom) else null
-  } finally { @Suppress("DEPRECATION") root.recycle() }
- }
- fun controlOverlayBounds()=quickControls?.occupiedBounds() ?: emptyList()
- private fun validOrigin():GeometrySnapshot? {
-  val now=SystemClock.elapsedRealtime()
-  val origin=FrameGeometryRegistry.forCaller(now) ?: return null
-  if(!FrameGeometryRegistry.calibration.valid(origin,now) || !isGameForeground())return null
-  val display=de.robinthor.digiworldexplorer.capture.PhysicalDisplay.bounds(this,AutomationState.forceLegacyCaptureMetrics)
-  if(display!=origin.geometry.display.bounds || gameWindowBounds()?.intersect(display)!=origin.geometry.display.gameWindow || resources.configuration.densityDpi!=origin.geometry.display.densityDpi)return null
-  return origin
- }
- fun dispatchValidatedTap(x:Float,y:Float,onComplete:(Boolean)->Unit) {
-  if(de.robinthor.digiworldexplorer.feed.StageFailedFrameAnalyzer.blocksOtherInput){PersistentDiagnosticLog.record("GESTURE","tap rejected: Growth Guide foreground recovery owns input local=$x,$y");onComplete(false);return}
-  val origin=validOrigin();val point=origin?.geometry?.map(x.toDouble(),y.toDouble())
-  val overlayBounds=controlOverlayBounds()
-  if(origin==null || point==null || overlayBounds.any { it.contains(point.x,point.y) }){
-   val reason=when {origin==null->"stale_missing_geometry_or_changed_display";point==null->"outside_game";else->"overlay_covered"}
-   PersistentDiagnosticLog.record("GESTURE","tap rejected reason=$reason local=$x,$y display=$point overlays=$overlayBounds generation=${origin?.generation}");onComplete(false);return
-  }
-  val sample=PersistentDiagnosticLog.sampleAction("tap",x.toInt(),y.toInt())
-  val evidence="local=$x,$y display=${point.x},${point.y} sample=$sample"
-  PersistentDiagnosticLog.record("GESTURE","tap $evidence generation=${origin.generation}")
-  val path=Path().apply { moveTo(point.x.toFloat(),point.y.toFloat()) }
-  dispatchMappedGesture(path,80,origin,onComplete,evidence)
- }
- private fun dispatchMappedGesture(path:Path,duration:Long,origin:GeometrySnapshot,onComplete:(Boolean)->Unit,evidence:String="swipe") {
-  val gesture=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path,0,duration)).build()
-  fun finish(ok:Boolean)=FrameGeometryRegistry.withSnapshot(origin) {
-   // Completion confirms Android input delivery, NOT the game's desired action.
-   onComplete(ok && FrameGeometryRegistry.calibration.valid(origin,SystemClock.elapsedRealtime()))
-  }
-  val accepted=dispatchGesture(gesture,object:GestureResultCallback() {
-   override fun onCompleted(d:GestureDescription?){PersistentDiagnosticLog.record("GESTURE","input completed $evidence generation=${origin.generation}; visual confirmation required");finish(true)}
-   override fun onCancelled(d:GestureDescription?){PersistentDiagnosticLog.record("GESTURE","input cancelled $evidence generation=${origin.generation}");finish(false)}
-  },null)
-  if(!accepted)finish(false)
- }
- fun dispatchValidatedSwipe(x1:Float,y1:Float,x2:Float,y2:Float,onComplete:(Boolean)->Unit) {
-  if(de.robinthor.digiworldexplorer.feed.StageFailedFrameAnalyzer.blocksOtherInput){PersistentDiagnosticLog.record("GESTURE","swipe rejected: Growth Guide foreground recovery owns input");onComplete(false);return}
-  val origin=validOrigin();val a=origin?.geometry?.map(x1.toDouble(),y1.toDouble());val b=origin?.geometry?.map(x2.toDouble(),y2.toDouble())
-  if(origin==null || a==null || b==null || controlOverlayBounds().any { it.intersectsSegment(a,b) }){PersistentDiagnosticLog.record("GESTURE","swipe rejected: invalid geometry/target or overlay obstruction");onComplete(false);return}
-  PersistentDiagnosticLog.record("GESTURE","swipe local=$x1,$y1->$x2,$y2 display=$a->$b generation=${origin.generation}")
-  dispatchMappedGesture(Path().apply{moveTo(a.x.toFloat(),a.y.toFloat());lineTo(b.x.toFloat(),b.y.toFloat())},420,origin,onComplete)
- }
- fun dispatchBack(onComplete:(Boolean)->Unit={}){if(de.robinthor.digiworldexplorer.feed.StageFailedFrameAnalyzer.blocksOtherInput){PersistentDiagnosticLog.record("GESTURE","back rejected: Growth Guide foreground recovery owns input");onComplete(false);return};val ok=performGlobalAction(GLOBAL_ACTION_BACK);de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.record("GESTURE","back result=$ok");onComplete(ok)}
- fun dispatchSafeRandomizedTap(x:Float,y:Float,onComplete:(Boolean)->Unit){
-  // Ein dp Varianz ist auf allen Zielbuttons weit innerhalb des erkannten Mittelpunkts.
-  val geometry=validOrigin()?.geometry ?: run { onComplete(false);return }
-  val radius=(resources.displayMetrics.density.coerceAtLeast(1f)/geometry.scaleToDisplay).toFloat()
-  val (jx,jy)=SafeTapRandomizer.point(x,y,radius,radius)
-  dispatchValidatedTap(jx,jy,onComplete)
- }
- fun dispatchNormalizedTap(xRatio:Float,yRatio:Float,onComplete:(Boolean)->Unit) {
-  val geometry=validOrigin()?.geometry
-  if(geometry==null || !xRatio.isFinite() || !yRatio.isFinite() || xRatio !in 0f..1f || yRatio !in 0f..1f){onComplete(false);return}
-  dispatchSafeRandomizedTap(xRatio*(geometry.analysisSize.width-1),yRatio*(geometry.analysisSize.height-1),onComplete)
- }
- fun clearCalibrationOverlay(){overlay?.post{overlay?.bounds=null;overlay?.visibility=View.GONE;overlay?.invalidate()}}
- fun setOverlayEnabled(enabled:Boolean){overlay?.post{overlay?.visibility=if(enabled)View.VISIBLE else View.GONE};quickControls?.refresh()}
- fun setQuickControlsEnabled(enabled:Boolean){
-  if(enabled){if(quickControls==null)quickControls=QuickControlOverlay(this).also{it.show()}}
-  else{quickControls?.destroy();quickControls=null}
- }
- fun setQuickStatusVisible(visible:Boolean){
-  getSharedPreferences("settings",MODE_PRIVATE).edit().putBoolean("director_card_visible",visible).apply()
-  quickControls?.setDirectorCardVisible(visible)
- }
- fun hideForCapture(){overlay?.post{overlay?.captureMode=true;overlay?.invalidate()}}
- fun updateStatusKeepingGrid(status:String,visible:Boolean=true,sourceScreen:de.robinthor.digiworldexplorer.automation.ObservedScreen?=null){ScreenDirector.noteAction(status,sourceScreen);val snapshot=ScreenDirector.snapshot();quickControls?.updateDirector(snapshot);overlay?.post{overlay?.apply{this.status=status;captureMode=false;visibility=if(visible)View.VISIBLE else View.GONE;invalidate()}}}
- fun showStatusOnly(status:String,visible:Boolean=true,sourceScreen:de.robinthor.digiworldexplorer.automation.ObservedScreen?=null){de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.record("STATUS","source=${sourceScreen?.name ?: "NONE"} visible=$visible text=$status");if(status.contains("park",true)||status.contains("fail",true)||status.contains("timeout",true)||status.contains("not confirmed",true)||status.contains("unreadable",true)||status.contains("starting",true)||status.contains("opening",true))de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.requestScreenshot("status-$status");ScreenDirector.noteAction(status,sourceScreen);val snapshot=ScreenDirector.snapshot();quickControls?.updateDirector(snapshot);overlay?.post{overlay?.apply{bounds=null;player=null;items=emptySet();obstacles=emptySet();target=null;this.status=status;captureMode=false;visibility=View.GONE;invalidate()}}}
- fun updateDirector(snapshot:DirectorSnapshot){quickControls?.updateDirector(snapshot)}
- fun updateOverlay(bounds:GridBounds?,player:Cell?,items:Set<Cell>,obstacles:Set<Cell>,target:Cell?,status:String,visible:Boolean,hud:HudCounters=HudCounters(),dashButton:Pair<Float,Float>?=null){
-  // Successful DWS frames must refresh the quick status too. Previously only a failed
-  // frame updated ScreenDirector, leaving "paused/no grid" while movement had resumed.
-  if(bounds!=null){ScreenDirector.noteAction(status,de.robinthor.digiworldexplorer.automation.ObservedScreen.WORLD_SEARCH);quickControls?.updateDirector(ScreenDirector.snapshot())}
-  overlay?.post{overlay?.apply{this.bounds=bounds;this.player=player;this.items=items;this.obstacles=obstacles;this.target=target;this.status=status;this.hud=hud;this.dashButton=dashButton;captureMode=false;visibility=if(visible)View.VISIBLE else View.GONE;invalidate()}}
- }
- // FLAG_LAYOUT_NO_LIMITS und LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS sind noetig, damit das Overlay im
- // selben Koordinatensystem liegt wie der Vollbild-Capture. Ohne beides ist das Fenster um die
- // Statusleistenhoehe nach unten versetzt; die gezeichneten Linien landen dann in den Abtastfenstern
- // der Zellen und verfaelschen die naechste Analyse (messbar: unterste Reihe komplett als Item erkannt).
- // FLAG_SECURE ist hier bewusst NICHT gesetzt: es schwaerzt auf Android 15 die gesamte MediaProjection.
- private fun showOverlay(){if(overlay!=null)return;android.util.Log.i("DigiWorldOverlay","create canDrawOverlays=${Settings.canDrawOverlays(this)}");overlay=GridOverlayView().also{getSystemService(WindowManager::class.java).addView(it,WindowManager.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT,WindowManager.LayoutParams.MATCH_PARENT,if(Settings.canDrawOverlays(this)) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,PixelFormat.TRANSLUCENT).apply{gravity=Gravity.TOP or Gravity.START;layoutInDisplayCutoutMode=WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS})}}
- private fun removeOverlay(){overlay?.let{runCatching{getSystemService(WindowManager::class.java).removeView(it)}};overlay=null}
- inner class GridOverlayView:View(this){var bounds:GridBounds?=null;var player:Cell?=null;var items:Set<Cell> = emptySet();var obstacles:Set<Cell> = emptySet();var target:Cell?=null;var status=getString(R.string.overlay_bot_ready);var hud:HudCounters=HudCounters();var dashButton:Pair<Float,Float>?=null;var captureMode=false;private val p=Paint(Paint.ANTI_ALIAS_FLAG).apply{style=Paint.Style.STROKE}
-  init{background=ColorDrawable(Color.TRANSPARENT)}
-  // Alle Maße sind relativ zur Zellgröße, damit nichts in die Abtastfenster der Klassifizierung ragt:
-  // CellClassifier und PreviewClassifier lassen an jeder Zellkante 7% Rand aus. Linien liegen auf den
-  // Zellgrenzen, Boxen bei 3,5% Einrückung, jeweils inklusive halber Strichstärke unter 6%. Dadurch
-  // darf das Overlay dauerhaft sichtbar bleiben und muss für die Analyse nicht mehr ausgeblendet werden.
-  override fun onDraw(c:Canvas){super.onDraw(c);if(captureMode)return;val b=bounds
-   if(b==null)return
-   val geometry=FrameGeometryRegistry.current(SystemClock.elapsedRealtime())?.geometry ?: return
-   val location=IntArray(2);getLocationOnScreen(location)
-   val checkpoint=c.save()
-   c.translate((geometry.displayOrigin.x-location[0]).toFloat(),(geometry.displayOrigin.y-location[1]).toFloat())
-   c.scale(geometry.scaleToDisplay.toFloat(),geometry.scaleToDisplay.toFloat())
-   c.clipRect(0,0,geometry.analysisSize.width,geometry.analysisSize.height)
-   val cw=(b.right-b.left)/5f;val ch=(b.bottom-b.top)/5f;val unit=minOf(cw,ch)
-   p.pathEffect=null;p.style=Paint.Style.STROKE;p.color=Color.GREEN;p.strokeWidth=unit*.025f;for(i in 0..5){c.drawLine(b.left+i*cw,b.top.toFloat(),b.left+i*cw,b.bottom.toFloat(),p);c.drawLine(b.left.toFloat(),b.top+i*ch,b.right.toFloat(),b.top+i*ch,p)}
-   p.pathEffect=DashPathEffect(floatArrayOf(unit*.07f,unit*.05f),0f);c.drawRect(b.right.toFloat(),b.top.toFloat(),b.right+cw,b.bottom.toFloat(),p);for(i in 1..4)c.drawLine(b.right.toFloat(),b.top+i*ch,b.right+cw,b.top+i*ch,p);p.pathEffect=null
-   val inset=unit*.035f
-   fun box(cell:Cell,color:Int,w:Float){p.color=color;p.strokeWidth=w;val l=b.left+cell.col*cw+inset;val t=b.top+cell.row*ch+inset;c.drawRect(l,t,l+cw-2*inset,t+ch-2*inset,p)}
-   obstacles.forEach{box(it,Color.RED,unit*.035f)};items.forEach{box(it,Color.MAGENTA,unit*.04f)};player?.let{box(it,Color.YELLOW,unit*.05f)};target?.let{box(it,Color.CYAN,unit*.05f)}
-   // Dash-Debug: erkannte HUD-Zahl und gefundener Button. Grün = Vorrat > 0, Rot = sicher 0,
-   // Grau = Zahl unlesbar. Die Boxen liegen außerhalb der Raster-Abtastflächen.
-   val dashColor=when{hud.dash==0->Color.RED;hud.dash!=null&&hud.dash!!>0->Color.GREEN;else->Color.GRAY}
-   p.style=Paint.Style.STROKE;p.pathEffect=null;p.color=dashColor;p.strokeWidth=unit*.035f
-   hud.dashBox?.let{d->c.drawRoundRect(d.left-unit*.04f,d.top-unit*.04f,d.right+unit*.04f,d.bottom+unit*.04f,unit*.05f,unit*.05f,p)}
-   dashButton?.let{(x,y)->c.drawCircle(x,y,unit*.25f,p)}
-   // Status direkt unter dem Raster im hellen Bereich. Heller Umriss plus dunkle Füllung bleibt auf
-   // hellem wie dunklem Untergrund lesbar; unterhalb von bounds.bottom liegt kein Abtastfenster mehr.
-   val ts=ch*.24f;p.textSize=ts;val below=b.bottom+ts*1.15f;val ty=if(below<=geometry.analysisSize.height-ts*.3f)below else (b.top-ts*.45f).coerceAtLeast(ts)
-   p.style=Paint.Style.STROKE;p.strokeWidth=ts*.20f;p.color=Color.WHITE;c.drawText(status,b.left.toFloat(),ty,p)
-   p.style=Paint.Style.FILL;p.color=Color.rgb(12,20,36);c.drawText(status,b.left.toFloat(),ty,p)
-   c.restoreToCount(checkpoint)
-}
- }
- companion object{@Volatile var instance:DigiWorldAccessibilityService?=null;private set}
+class DigiWorldAccessibilityService : AccessibilityService() {
+    @Volatile private var activePackage: String? = null
+    private var overlay: GridOverlayView? = null
+    private var quickControls: QuickControlOverlay? = null
+
+    override fun onServiceConnected() {
+        instance = this
+        PersistentDiagnosticLog.initialize(this)
+        PersistentDiagnosticLog.record("SERVICE", "accessibility connected")
+
+        // 1. DUKUNGAN ANDROID 9: Paksa pendaftaran Flag Event agar tidak "macet" di Android 9
+        configureServiceFlags()
+
+        // 2. DUKUNGAN ANDROID 9: Jalankan Foreground Notification agar tidak dibunuh OS
+        startForegroundNotification()
+
+        showOverlay()
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        if (prefs.getBoolean("quick_overlay_enabled", false)) setQuickControlsEnabled(true)
+        setOverlayEnabled(AutomationState.overlayEnabled)
+    }
+
+    private fun configureServiceFlags() {
+        val info = serviceInfo ?: AccessibilityServiceInfo()
+        info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or 
+                          AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or 
+                          AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        
+        info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
+        
+        // Android 9 sangat membutuhkan FLAG_RETRIEVE_INTERACTIVE_WINDOWS untuk query windows.firstOrNull
+        info.flags = info.flags or
+                AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
+                AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+        
+        info.notificationTimeout = 100
+        this.serviceInfo = info
+    }
+
+    private fun startForegroundNotification() {
+        val channelId = "digiworld_bot_service"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                "DigiWorld Bot Service",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(channel)
+        }
+
+        val notification: Notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle("DigiWorld Bot Running")
+            .setContentText("Layanan Aksesibilitas Aktif & Responsif")
+            .setSmallIcon(R.drawable.ic_launcher_foreground) // Ganti jika ada ikon khusus
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
+            .build()
+
+        startForeground(1001, notification)
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        event?.packageName?.toString()?.let { activePackage = it }
+    }
+
+    override fun onInterrupt() = Unit
+
+    fun isGameForeground(): Boolean {
+        // PERBAIKAN ANDROID 9: Fallback jika list windows kosong/null pada Android 9
+        val appWindows = try { windows } catch (e: Exception) { null }
+        val application = appWindows?.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }
+        val root = application?.root ?: rootInActiveWindow
+        val current = root?.packageName?.toString() ?: activePackage
+        @Suppress("DEPRECATION")
+        root?.recycle()
+        return current == "com.bandainamcoent.dgup_ww"
+    }
+
+    override fun onDestroy() {
+        quickControls?.destroy()
+        quickControls = null
+        removeOverlay()
+        if (instance === this) instance = null
+        super.onDestroy()
+    }
+
+    fun gameWindowBounds(): PixelRect? {
+        val appWindows = try { windows } catch (e: Exception) { null }
+        val window = appWindows?.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }
+        val root = window?.root ?: rootInActiveWindow ?: return null
+        try {
+            if (root.packageName?.toString() != "com.bandainamcoent.dgup_ww") return null
+            val rect = Rect()
+            if (window != null) window.getBoundsInScreen(rect) else root.getBoundsInScreen(rect)
+
+            // DUKUNGAN RESOLUSI 720p: Validasi agar rect benar-benar berada di dalam layar
+            return if (rect.width() > 0 && rect.height() > 0) PixelRect(rect.left, rect.top, rect.right, rect.bottom) else null
+        } finally {
+            @Suppress("DEPRECATION")
+            root.recycle()
+        }
+    }
+
+    fun controlOverlayBounds() = quickControls?.occupiedBounds() ?: emptyList()
+
+    private fun validOrigin(): GeometrySnapshot? {
+        val now = SystemClock.elapsedRealtime()
+        val origin = FrameGeometryRegistry.forCaller(now) ?: return null
+        if (!FrameGeometryRegistry.calibration.valid(origin, now) || !isGameForeground()) return null
+        val display = de.robinthor.digiworldexplorer.capture.PhysicalDisplay.bounds(this, AutomationState.forceLegacyCaptureMetrics)
+        if (display != origin.geometry.display.bounds || gameWindowBounds()?.intersect(display) != origin.geometry.display.gameWindow || resources.configuration.densityDpi != origin.geometry.display.densityDpi) return null
+        return origin
+    }
+
+    fun dispatchValidatedTap(x: Float, y: Float, onComplete: (Boolean) -> Unit) {
+        val origin = validOrigin()
+        val point = origin?.geometry?.map(x.toDouble(), y.toDouble())
+        if (origin == null || point == null || controlOverlayBounds().any { it.contains(point.x, point.y) }) {
+            PersistentDiagnosticLog.record("GESTURE", "tap rejected: stale/missing geometry, outside game or overlay-covered target x=$x y=$y")
+            onComplete(false)
+            return
+        }
+        PersistentDiagnosticLog.sampleAction("tap", x.toInt(), y.toInt())
+        PersistentDiagnosticLog.record("GESTURE", "tap local=$x,$y display=${point.x},${point.y} generation=${origin.generation}")
+        
+        val path = Path().apply { moveTo(point.x.toFloat(), point.y.toFloat()) }
+        
+        // PERBAIKAN DURATION GESTURE: Dinaikkan ke 100ms agar Android 9 sempat mengeksekusi gesture tanpa di-cancel
+        dispatchMappedGesture(path, 100, origin, onComplete)
+    }
+
+    private fun dispatchMappedGesture(path: Path, duration: Long, origin: GeometrySnapshot, onComplete: (Boolean) -> Unit) {
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
+            .build()
+
+        fun finish(ok: Boolean) = FrameGeometryRegistry.withSnapshot(origin) {
+            onComplete(ok && FrameGeometryRegistry.calibration.valid(origin, SystemClock.elapsedRealtime()))
+        }
+
+        val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(d: GestureDescription?) {
+                PersistentDiagnosticLog.record("GESTURE", "input completed generation=${origin.generation}; visual confirmation required")
+                finish(true)
+            }
+
+            override fun onCancelled(d: GestureDescription?) {
+                PersistentDiagnosticLog.record("GESTURE", "input cancelled")
+                finish(false)
+            }
+        }, null)
+
+        if (!accepted) finish(false)
+    }
+
+    fun dispatchValidatedSwipe(x1: Float, y1: Float, x2: Float, y2: Float, onComplete: (Boolean) -> Unit) {
+        val origin = validOrigin()
+        val a = origin?.geometry?.map(x1.toDouble(), x1.toDouble())
+        val b = origin?.geometry?.map(x2.toDouble(), y2.toDouble())
+        if (origin == null || a == null || b == null || controlOverlayBounds().any { it.intersectsSegment(a, b) }) {
+            PersistentDiagnosticLog.record("GESTURE", "swipe rejected: invalid geometry/target or overlay obstruction")
+            onComplete(false)
+            return
+        }
+        PersistentDiagnosticLog.record("GESTURE", "swipe local=$x1,$y1->$x2,$y2 display=$a->$b generation=${origin.generation}")
+        dispatchMappedGesture(Path().apply { moveTo(a.x.toFloat(), a.y.toFloat()); lineTo(b.x.toFloat(), b.y.toFloat()) }, 450, origin, onComplete)
+    }
+
+    fun dispatchBack(onComplete: (Boolean) -> Unit = {}) {
+        val ok = performGlobalAction(GLOBAL_ACTION_BACK)
+        PersistentDiagnosticLog.record("GESTURE", "back result=$ok")
+        onComplete(ok)
+    }
+
+    fun dispatchSafeRandomizedTap(x: Float, y: Float, onComplete: (Boolean) -> Unit) {
+        val geometry = validOrigin()?.geometry ?: run { onComplete(false); return }
+        val radius = (resources.displayMetrics.density.coerceAtLeast(1f) / geometry.scaleToDisplay).toFloat()
+        val (jx, jy) = SafeTapRandomizer.point(x, y, radius, radius)
+        dispatchValidatedTap(jx, jy, onComplete)
+    }
+
+    fun dispatchNormalizedTap(xRatio: Float, yRatio: Float, onComplete: (Boolean) -> Unit) {
+        val geometry = validOrigin()?.geometry
+        if (geometry == null || !xRatio.isFinite() || !yRatio.isFinite() || xRatio !in 0f..1f || yRatio !in 0f..1f) {
+            onComplete(false)
+            return
+        }
+        dispatchSafeRandomizedTap(xRatio * (geometry.analysisSize.width - 1), yRatio * (geometry.analysisSize.height - 1), onComplete)
+    }
+
+    fun clearCalibrationOverlay() {
+        overlay?.post {
+            overlay?.bounds = null
+            overlay?.visibility = View.GONE
+            overlay?.invalidate()
+        }
+    }
+
+    fun setOverlayEnabled(enabled: Boolean) {
+        overlay?.post { overlay?.visibility = if (enabled) View.VISIBLE else View.GONE }
+        quickControls?.refresh()
+    }
+
+    fun setQuickControlsEnabled(enabled: Boolean) {
+        if (enabled) {
+            if (quickControls == null) quickControls = QuickControlOverlay(this).also { it.show() }
+        } else {
+            quickControls?.destroy()
+            quickControls = null
+        }
+    }
+
+    fun setQuickStatusVisible(visible: Boolean) {
+        getSharedPreferences("settings", MODE_PRIVATE).edit().putBoolean("director_card_visible", visible).apply()
+        quickControls?.setDirectorCardVisible(visible)
+    }
+
+    fun hideForCapture() {
+        overlay?.post {
+            overlay?.captureMode = true
+            overlay?.invalidate()
+        }
+    }
+
+    fun updateStatusKeepingGrid(status: String, visible: Boolean = true, sourceScreen: de.robinthor.digiworldexplorer.automation.ObservedScreen? = null) {
+        ScreenDirector.noteAction(status, sourceScreen)
+        val snapshot = ScreenDirector.snapshot()
+        quickControls?.updateDirector(snapshot)
+        overlay?.post {
+            overlay?.apply {
+                this.status = status
+                captureMode = false
+                visibility = if (visible) View.VISIBLE else View.GONE
+                invalidate()
+            }
+        }
+    }
+
+    fun showStatusOnly(status: String, visible: Boolean = true, sourceScreen: de.robinthor.digiworldexplorer.automation.ObservedScreen? = null) {
+        PersistentDiagnosticLog.record("STATUS", "source=${sourceScreen?.name ?: "NONE"} visible=$visible text=$status")
+        if (status.contains("park", true) || status.contains("fail", true) || status.contains("timeout", true) || status.contains("not confirmed", true) || status.contains("unreadable", true) || status.contains("starting", true) || status.contains("opening", true)) {
+            PersistentDiagnosticLog.requestScreenshot("status-$status")
+        }
+        ScreenDirector.noteAction(status, sourceScreen)
+        val snapshot = ScreenDirector.snapshot()
+        quickControls?.updateDirector(snapshot)
+        overlay?.post {
+            overlay?.apply {
+                bounds = null
+                player = null
+                items = emptySet()
+                obstacles = emptySet()
+                target = null
+                this.status = status
+                captureMode = false
+                visibility = View.GONE
+                invalidate()
+            }
+        }
+    }
+
+    fun updateDirector(snapshot: DirectorSnapshot) {
+        quickControls?.updateDirector(snapshot)
+    }
+
+    fun updateOverlay(bounds: GridBounds?, player: Cell?, items: Set<Cell>, obstacles: Set<Cell>, target: Cell?, status: String, visible: Boolean, hud: HudCounters = HudCounters(), dashButton: Pair<Float, Float>? = null) {
+        if (bounds != null) {
+            ScreenDirector.noteAction(status, de.robinthor.digiworldexplorer.automation.ObservedScreen.WORLD_SEARCH)
+            quickControls?.updateDirector(ScreenDirector.snapshot())
+        }
+        overlay?.post {
+            overlay?.apply {
+                this.bounds = bounds
+                this.player = player
+                this.items = items
+                this.obstacles = obstacles
+                this.target = target
+                this.status = status
+                this.hud = hud
+                this.dashButton = dashButton
+                captureMode = false
+                visibility = if (visible) View.VISIBLE else View.GONE
+                invalidate()
+            }
+        }
+    }
+
+    private fun showOverlay() {
+        if (overlay != null) return
+        android.util.Log.i("DigiWorldOverlay", "create canDrawOverlays=${Settings.canDrawOverlays(this)}")
+        
+        // PERBAIKAN CUTOUT & OVERLAY UNTUK ANDROID 9 (720x1600):
+        val layoutParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            if (Settings.canDrawOverlays(this)) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+
+        overlay = GridOverlayView().also {
+            getSystemService(WindowManager::class.java).addView(it, layoutParams)
+        }
+    }
+
+    private fun removeOverlay() {
+        overlay?.let { runCatching { getSystemService(WindowManager::class.java).removeView(it) } }
+        overlay = null
+    }
+
+    inner class GridOverlayView : View(this) {
+        var bounds: GridBounds? = null
+        var player: Cell? = null
+        var items: Set<Cell> = emptySet()
+        var obstacles: Set<Cell> = emptySet()
+        var target: Cell? = null
+        var status = getString(R.string.overlay_bot_ready)
+        var hud: HudCounters = HudCounters()
+        var dashButton: Pair<Float, Float>? = null
+        var captureMode = false
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+
+        init {
+            background = ColorDrawable(Color.TRANSPARENT)
+        }
+
+        override fun onDraw(c: Canvas) {
+            super.onDraw(c)
+            if (captureMode) return
+            val b = bounds ?: return
+            val geometry = FrameGeometryRegistry.current(SystemClock.elapsedRealtime())?.geometry ?: return
+            val location = IntArray(2)
+            getLocationOnScreen(location)
+
+            val checkpoint = c.save()
+            c.translate((geometry.displayOrigin.x - location[0]).toFloat(), (geometry.displayOrigin.y - location[1]).toFloat())
+            c.scale(geometry.scaleToDisplay.toFloat(), geometry.scaleToDisplay.toFloat())
+            c.clipRect(0, 0, geometry.analysisSize.width, geometry.analysisSize.height)
+
+            val cw = (b.right - b.left) / 5f
+            val ch = (b.bottom - b.top) / 5f
+            val unit = minOf(cw, ch)
+
+            p.pathEffect = null
+            p.style = Paint.Style.STROKE
+            p.color = Color.GREEN
+            p.strokeWidth = unit * .025f
+            for (i in 0..5) {
+                c.drawLine(b.left + i * cw, b.top.toFloat(), b.left + i * cw, b.bottom.toFloat(), p)
+                c.drawLine(b.left.toFloat(), b.top + i * ch, b.right.toFloat(), b.top + i * ch, p)
+            }
+
+            p.pathEffect = DashPathEffect(floatArrayOf(unit * .07f, unit * .05f), 0f)
+            c.drawRect(b.right.toFloat(), b.top.toFloat(), b.right + cw, b.bottom.toFloat(), p)
+            for (i in 1..4) c.drawLine(b.right.toFloat(), b.top + i * ch, b.right + cw, b.top + i * ch, p)
+            p.pathEffect = null
+
+            val inset = unit * .035f
+            fun box(cell: Cell, color: Int, w: Float) {
+                p.color = color
+                p.strokeWidth = w
+                val l = b.left + cell.col * cw + inset
+                val t = b.top + cell.row * ch + inset
+                c.drawRect(l, t, l + cw - 2 * inset, t + ch - 2 * inset, p)
+            }
+
+            obstacles.forEach { box(it, Color.RED, unit * .035f) }
+            items.forEach { box(it, Color.MAGENTA, unit * .04f) }
+            player?.let { box(it, Color.YELLOW, unit * .05f) }
+            target?.let { box(it, Color.CYAN, unit * .05f) }
+
+            val dashColor = when {
+                hud.dash == 0 -> Color.RED
+                hud.dash != null && hud.dash!! > 0 -> Color.GREEN
+                else -> Color.GRAY
+            }
+            p.style = Paint.Style.STROKE
+            p.pathEffect = null
+            p.color = dashColor
+            p.strokeWidth = unit * .035f
+
+            hud.dashBox?.let { d -> c.drawRoundRect(d.left - unit * .04f, d.top - unit * .04f, d.right + unit * .04f, d.bottom + unit * .04f, unit * .05f, unit * .05f, p) }
+            dashButton?.let { (x, y) -> c.drawCircle(x, y, unit * .25f, p) }
+
+            val ts = ch * .24f
+            p.textSize = ts
+            val below = b.bottom + ts * 1.15f
+            val ty = if (below <= geometry.analysisSize.height - ts * .3f) below else (b.top - ts * .45f).coerceAtLeast(ts)
+            p.style = Paint.Style.STROKE
+            p.strokeWidth = ts * .20f
+            p.color = Color.WHITE
+            c.drawText(status, b.left.toFloat(), ty, p)
+
+            p.style = Paint.Style.FILL
+            p.color = Color.rgb(12, 20, 36)
+            c.drawText(status, b.left.toFloat(), ty, p)
+
+            c.restoreToCount(checkpoint)
+        }
+    }
+
+    companion object {
+        @Volatile var instance: DigiWorldAccessibilityService? = null
+            private set
+    }
 }
