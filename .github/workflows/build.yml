@@ -18,27 +18,31 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: gradle
 
-      - name: Grant Execute Permission & Build APK
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Generate Gradle Wrapper & Build APK
         run: |
-          # Cari lokasi file gradlew di dalam folder proyek
-          GRADLEW_PATH=$(find . -name "gradlew" -type f | head -n 1)
+          # Cari file build.gradle utama untuk menentukan lokasi proyek
+          BUILD_FILE=$(find . -name "build.gradle" -o -name "build.gradle.kts" | head -n 1)
           
-          if [ -z "$GRADLEW_PATH" ]; then
-            echo "Error: File gradlew tidak ditemukan di repository!"
+          if [ -z "$BUILD_FILE" ]; then
+            echo "Error: File build.gradle tidak ditemukan!"
             exit 1
           fi
           
-          echo "Ditemukan gradlew pada: $GRADLEW_PATH"
-          chmod +x "$GRADLEW_PATH"
-          
-          # Masuk ke folder tempat gradlew berada lalu jalankan build
-          PROJECT_DIR=$(dirname "$GRADLEW_PATH")
+          PROJECT_DIR=$(dirname "$BUILD_FILE")
           cd "$PROJECT_DIR"
+          
+          # Buat file gradlew secara otomatis jika belum ada
+          gradle wrapper
+          chmod +x gradlew
+          
+          # Jalankan kompilasi APK
           ./gradlew assembleDebug --stacktrace
           
-          # Salin file APK hasil build ke folder utama agar bisa di-upload
+          # Salin hasil APK
           mkdir -p $GITHUB_WORKSPACE/output_apk
           find . -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output_apk/ \;
 
