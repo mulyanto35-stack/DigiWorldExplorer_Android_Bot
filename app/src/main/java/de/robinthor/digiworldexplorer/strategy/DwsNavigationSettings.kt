@@ -9,7 +9,6 @@ data class DwsNavigationSettings(
     val blindStageFailedTap: Boolean = false,
     val trackAllSprites: Boolean = true,
     val phoneSafeMovement: Boolean = true,
-    /** Restores v4.0.0 classification and movement rules; updated game UI is observed jointly. */
     val legacyV4Core: Boolean = false,
 )
 
@@ -18,8 +17,8 @@ enum class DwsNavigationProfile {
     V4_DASH,
     V5_ALL_SPRITES;
 
-    fun availableFor(supporterUnlocked: Boolean): Boolean =
-        supporterUnlocked || this != V5_ALL_SPRITES
+    // Selalu mengembalikan true agar semua profil aktif tanpa memverifikasi supporterUnlocked
+    fun availableFor(supporterUnlocked: Boolean): Boolean = true
 
     fun settings() = when (this) {
         V3_CLASSIC -> DwsNavigationSettings(
@@ -56,6 +55,6 @@ enum class DwsNavigationProfile {
             entries.firstOrNull { it.name == value } ?: V4_DASH
 
         fun fromPreferenceForAccess(value: String?, supporterUnlocked: Boolean): DwsNavigationProfile =
-            fromPreference(value).takeIf { it.availableFor(supporterUnlocked) } ?: V4_DASH
+            fromPreference(value)
     }
 }

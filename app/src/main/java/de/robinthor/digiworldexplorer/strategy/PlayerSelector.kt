@@ -1,26 +1,63 @@
 package de.robinthor.digiworldexplorer.strategy
-import de.robinthor.digiworldexplorer.detection.*
+
+import de.robinthor.digiworldexplorer.detection.Cell
+import de.robinthor.digiworldexplorer.detection.CellScores
 import kotlin.math.abs
-object PlayerSelector{
- fun select(cells:Map<Cell,CellScores>,previous:Cell?,expected:Cell?,recentItems:Set<Cell>,minScore:Double=.08,
-            legacyV4Core:Boolean=false):Map.Entry<Cell,CellScores>?{
-  val candidates=cells.entries.filter{it.value.player>=minScore}
-  expected?.let{e->candidates.firstOrNull{it.key==e}?.let{return it}}
-  // [recentItems] unterdrueckt Zellen, deren Item-Farbe als Spieler missdeutet werden koennte.
-  // Die zuletzt bestaetigte Spielerzelle ist davon ausgenommen: die Figur kann nicht
-  // verschwinden, und ihr eigenes Sprite faerbt die Zelle dauerhaft als vermeintliches Item ein.
-  val nearby=candidates.filter{e->(e.key==previous||e.key !in recentItems)&&(previous==null||distance(e.key,previous)<=1)}
-  if(legacyV4Core)return nearby.maxByOrNull{e->e.value.player+(if(e.key==previous).04 else 0.0)}
-  // Large partner sprites (notably Botamon/Botemon-class figures) spill into a neighbouring
-  // cell. The neighbour may briefly have the larger raw colour score although no move happened.
-  // Keep the previously proven cell while it still carries most of the best nearby evidence;
-  // an explicitly expected destination above always wins after a commanded move.
-  previous?.let { old ->
-   val oldEntry=nearby.firstOrNull{it.key==old}
-   val best=nearby.maxOfOrNull{it.value.player}?:0.0
-   if(oldEntry!=null&&oldEntry.value.player>=best*.68)return oldEntry
-  }
-  return nearby.maxByOrNull{e->e.value.player}
- }
- private fun distance(a:Cell,b:Cell)=abs(a.row-b.row)+abs(a.col-b.col)
+
+/**
+ * Pemilih sel posisi pemain.
+ * Dioptimalkan untuk Android 9 (API 28) - Pemrosesan memori efisien.
+ */
+object PlayerSelector {
+    fun select(
+        cells: Map<Cell, CellScores>,
+        previous: Cell?,
+        expected: Cell?,
+        recentItems: Set<Cell>,
+        minScore: Double = .08,
+        legacyV4Core: Boolean = false
+    ): Map.Entry<Cell, CellScores>? {
+        if (cells.isEmpty()) return null
+
+        expected?.let { e ->
+            val match = cells.entries.firstOrNull { it.key == e && it.value.player >= minScore }
+            if (match != null) return match
+        }
+
+        var bestEntry: Map.Entry<Cell, CellScores>? = null
+        var maxCalculatedScore = -1.0
+
+        for (entry in cells.entries) {
+            val score = entry.value.player
+            if (score < minScore) continue
+
+            val cell = entry.key
+            if (cell in recentItems && cell != previous) continue
+            if (previous != null && distance(cell, previous) > 1) continue
+
+            if (legacyV4Core) {
+                val effectiveScore = score + (if (cell == previous) .04 else 0.0)
+                if (effectiveScore > maxCalculatedScore) {
+                    maxCalculatedScore = effectiveScore
+                    bestEntry = entry
+                }
+            } else {
+                if (score > maxCalculatedScore) {
+                    maxCalculatedScore = score
+                    bestEntry = entry
+                }
+            }
+        }
+
+        if (!legacyV4Core && previous != null) {
+            val oldEntry = cells.entries.firstOrNull { it.key == previous && it.value.player >= minScore }
+            if (oldEntry != null && maxCalculatedScore > 0 && oldEntry.value.player >= maxCalculatedScore * .68) {
+                return oldEntry
+            }
+        }
+
+        return bestEntry
+    }
+
+    private fun distance(a: Cell, b: Cell) = abs(a.row - b.row) + abs(a.col - b.col)
 }
