@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -15,13 +16,15 @@ import de.robinthor.digiworldexplorer.capture.ScreenCaptureService
 import de.robinthor.digiworldexplorer.dungeon.DungeonFrameAnalyzer
 import de.robinthor.digiworldexplorer.feed.FeedFrameAnalyzer
 import de.robinthor.digiworldexplorer.feed.StageFailedFrameAnalyzer
-import de.robinthor.digiworldexplorer.license.SupporterLicenseManager
 import de.robinthor.digiworldexplorer.network.NetworkDefenseFrameAnalyzer
 import de.robinthor.digiworldexplorer.purchase.RewardPurchaseFrameAnalyzer
 import de.robinthor.digiworldexplorer.strategy.AutoMoveController
 import de.robinthor.digiworldexplorer.strategy.AutomationState
 
-/** Requests MediaProjection without bringing the full settings UI in front of the game. */
+/** 
+ * Activity transparan untuk meminta izin MediaProjection tanpa mengganggu game.
+ * Dioptimalkan untuk Android 9 (API 28) & Layar 720x1600 (20:9).
+ */
 class CaptureConsentActivity : ComponentActivity() {
     companion object {
         private const val GAME_PACKAGE = "com.bandainamcoent.dgup_ww"
@@ -55,38 +58,52 @@ class CaptureConsentActivity : ComponentActivity() {
             finishWithoutAnimation()
             return
         }
+
         val manager = getSystemService(MediaProjectionManager::class.java)
-        // Game-local pixels must have an unambiguous relationship to accessibility's
-        // display coordinates. App-only sharing can silently crop system bars/windows.
-        val captureIntent = if(android.os.Build.VERSION.SDK_INT>=34)
+        // Penyesuaian kompatibilitas Android 9 (API 28): MediaProjectionConfig hanya dipanggil di API 34+
+        val captureIntent = if (Build.VERSION.SDK_INT >= 34) {
             manager.createScreenCaptureIntent(android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay())
-        else manager.createScreenCaptureIntent()
+        } else {
+            manager.createScreenCaptureIntent()
+        }
         consent.launch(captureIntent)
     }
 
     private fun applyRuntimeSettings() {
         val settings = getSharedPreferences("settings", Context.MODE_PRIVATE)
-        val supporter = SupporterLicenseManager.load(this) != null
+        
+        // Pembukaan Lisensi Penuh: Set supporter = true secara konstan agar sinkron dengan MainActivity & Overlay
+        val supporter = true
+
         AutomationState.mode = de.robinthor.digiworldexplorer.automation.AutomationMode.fromPreference(
-            settings.getString("automation_mode", null))
+            settings.getString("automation_mode", null)
+        )
         val dwsProfile = de.robinthor.digiworldexplorer.strategy.DwsNavigationProfile.fromPreferenceForAccess(
-            settings.getString("dws_profile", null), supporter)
+            settings.getString("dws_profile", null), supporter
+        )
+
         AutomationState.overlayEnabled = settings.getBoolean("grid_enabled", true)
         AutomationState.autoPurchaseEnabled = settings.getBoolean("auto_purchase", false)
         AutomationState.autoDungeonEnabled = settings.getBoolean("auto_dungeon", false)
         AutomationState.autoNetworkDefenseEnabled = settings.getBoolean("auto_network_defense", false)
         AutomationState.autoFeedEnabled = settings.getBoolean("auto_feed", false)
-        AutomationState.autoBondRotationEnabled = supporter && settings.getBoolean("auto_bond_rotation", true)
-        AutomationState.copilotRewardsEnabled = supporter && settings.getBoolean("copilot_rewards", true)
-        AutomationState.copilotDwsEnabled = supporter && settings.getBoolean("copilot_dws", true)
-        AutomationState.autoFarmEnabled = supporter && settings.getBoolean("auto_farm_harvest", true)
+        
+        // Selalu izinkan fitur otomatisasi Supporter aktif jika dinyalakan pengguna
+        AutomationState.autoBondRotationEnabled = settings.getBoolean("auto_bond_rotation", true)
+        AutomationState.copilotRewardsEnabled = settings.getBoolean("copilot_rewards", true)
+        AutomationState.copilotDwsEnabled = settings.getBoolean("copilot_dws", true)
+        AutomationState.autoFarmEnabled = settings.getBoolean("auto_farm_harvest", true)
+        
         AutomationState.farmWateringEnabled = settings.getBoolean("farm_watering", true)
         AutomationState.adSkipPassEnabled = settings.getBoolean("ad_skip_pass", false)
         AutomationState.autoRunnerEnabled = false
         AutomationState.forceLegacyCaptureMetrics = settings.getBoolean("legacy_capture", true)
         AutomationState.summonTouchCorrection = settings.getBoolean("summon_touch_correction", false)
         AutomationState.dwsNavigationSettings = dwsProfile.settings()
+        
         settings.edit().putBoolean("dws_blind_stage_tap", true).apply()
+
+        // Reset state analyzer
         RewardPurchaseFrameAnalyzer.reset()
         de.robinthor.digiworldexplorer.automation.GameEntryAnalyzer.reset()
         DungeonFrameAnalyzer.reset()

@@ -149,21 +149,24 @@ class MainActivity : ComponentActivity() {
         autoFeed = settings.getBoolean("auto_feed", false)
         autoRunner = false
         settings.edit().putBoolean("auto_runner", false).apply()
+
+        // Bypass pengecekan lisensi untuk mode automation dan profil DWS
         automationMode = AutomationMode.fromPreference(settings.getString("automation_mode", null))
-            .takeIf { it != AutomationMode.FULL_AUTOPILOT || supporterLicense != null }
-            ?: AutomationMode.SEMI_AUTO
         dwsProfile = DwsNavigationProfile.fromPreferenceForAccess(
-            settings.getString("dws_profile", null), supporterLicense != null)
+            settings.getString("dws_profile", null), true)
+
         AutomationState.overlayEnabled = grid
         AutomationState.autoPurchaseEnabled = autoPurchase
         AutomationState.autoDungeonEnabled = autoDungeon
         AutomationState.autoNetworkDefenseEnabled = autoNetworkDefense
         AutomationState.autoFeedEnabled = autoFeed
-        AutomationState.autoBondRotationEnabled = supporterLicense != null && settings.getBoolean("auto_bond_rotation", true)
-        AutomationState.copilotDwsEnabled = supporterLicense != null && settings.getBoolean("copilot_dws", true)
+
+        // Izinkan fitur Supporter tanpa memverifikasi supporterLicense
+        AutomationState.autoBondRotationEnabled = settings.getBoolean("auto_bond_rotation", true)
+        AutomationState.copilotDwsEnabled = settings.getBoolean("copilot_dws", true)
         AutomationState.autoRunnerEnabled = false
         AutomationState.mode = automationMode
-        AutomationState.autoFarmEnabled = supporterLicense != null && settings.getBoolean("auto_farm_harvest", true)
+        AutomationState.autoFarmEnabled = settings.getBoolean("auto_farm_harvest", true)
         AutomationState.farmWateringEnabled = settings.getBoolean("farm_watering", true)
         AutomationState.adSkipPassEnabled = settings.getBoolean("ad_skip_pass", false)
         AutomationState.dwsNavigationSettings = dwsProfile.settings()
@@ -258,16 +261,14 @@ class MainActivity : ComponentActivity() {
                     getSharedPreferences("settings", MODE_PRIVATE).edit().putBoolean("auto_runner", enabled).apply()
                 },
                 onAutomationMode = { selected ->
-                    if (selected == AutomationMode.FULL_AUTOPILOT && supporterLicense == null) {
-                        showLicenseDialog = true
-                    } else {
-                        automationMode = selected
-                        AutomationState.mode = selected
-                        settings.edit().putString("automation_mode", selected.name).apply()
-                    }
+                    // Langsung mengizinkan pemilihan AutomationMode apa pun tanpa cek lisensi
+                    automationMode = selected
+                    AutomationState.mode = selected
+                    settings.edit().putString("automation_mode", selected.name).apply()
                 },
                 onDwsSettings = { selected ->
-                    dwsProfile = selected.takeIf { it.availableFor(supporterLicense != null) }
+                    // Membuka akses profile tanpa bergantung supporterLicense
+                    dwsProfile = selected.takeIf { it.availableFor(true) }
                         ?: DwsNavigationProfile.V4_DASH
                     AutomationState.dwsNavigationSettings = dwsProfile.settings()
                     de.robinthor.digiworldexplorer.capture.CaptureFrameAnalyzer.resetCalibration()
@@ -381,20 +382,19 @@ class MainActivity : ComponentActivity() {
         val preferences = getSharedPreferences("settings", MODE_PRIVATE)
         val starts = preferences.getInt("automation_start_count", 0) + 1
         preferences.edit().putInt("automation_start_count", starts).apply()
-        if (supporterLicense == null && starts % 5 == 0) showSupportPrompt = true else beginAutomation()
+        // Mengabaikan pengecekan supporterLicense untuk mengabaikan prompt dukungan paksa jika diinginkan
+        beginAutomation()
     }
 
     private fun beginAutomation() {
-        // A feature analyzer may stop its current session after a safety timeout. Re-apply the
-        // switches shown in the UI whenever the user starts automation again so a stale runtime
-        // value cannot leave an enabled VS/Tower switch reporting "Loop off".
         AutomationState.overlayEnabled = grid
         AutomationState.autoPurchaseEnabled = autoPurchase
         AutomationState.autoDungeonEnabled = autoDungeon
         AutomationState.autoNetworkDefenseEnabled = autoNetworkDefense
         AutomationState.autoFeedEnabled = autoFeed
         AutomationState.autoRunnerEnabled = autoRunner
-        AutomationState.autoFarmEnabled = supporterLicense != null && getSharedPreferences("settings", MODE_PRIVATE)
+        // Selalu izinkan autoFarmHarvest tanpa bergantung supporterLicense
+        AutomationState.autoFarmEnabled = getSharedPreferences("settings", MODE_PRIVATE)
             .getBoolean("auto_farm_harvest", true)
         AutomationState.farmWateringEnabled = getSharedPreferences("settings", MODE_PRIVATE)
             .getBoolean("farm_watering", true)
@@ -428,6 +428,7 @@ class MainActivity : ComponentActivity() {
         auto = false
         status = UiStatus.STOPPED
     }
+
     private fun syncSessionUi(automationEnabled: Boolean = AutomationState.enabled) {
         val session = CaptureSessionState.snapshot(automationEnabled)
         capture = session.captureActive
@@ -468,6 +469,7 @@ class MainActivity : ComponentActivity() {
             startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
         }
     }
+
     private fun bringGameToForeground() {
         packageManager.getLaunchIntentForPackage(GAME_PACKAGE)?.let { launch ->
             launch.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -485,8 +487,6 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         if (isFinishing && !isChangingConfigurations) {
             ScreenCaptureService.stop(this)
-            // Closing the actual app task also closes its floating UI. Keep the preferences so
-            // opening the app again can restore the user's chosen icon/status configuration.
             DigiWorldAccessibilityService.instance?.apply {
                 setQuickControlsEnabled(false)
                 clearCalibrationOverlay()
@@ -497,8 +497,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshPermissions() {
-        // Android/OEMs may leave the secure toggle enabled even after the service process crashed.
-        // Only a live service can execute taps or create the quick-control overlay.
         access = DigiWorldAccessibilityService.instance != null
         overlay = Settings.canDrawOverlays(this)
         batteryExempt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -516,19 +514,19 @@ class MainActivity : ComponentActivity() {
         autoFeed = settings.getBoolean("auto_feed", false)
         autoRunner = false
         settings.edit().putBoolean("auto_runner", false).apply()
+
+        // Izinkan pembacaan preferensi tanpa validasi lisensi
         automationMode = AutomationMode.fromPreference(settings.getString("automation_mode", null))
-            .takeIf { it != AutomationMode.FULL_AUTOPILOT || supporterLicense != null }
-            ?: AutomationMode.SEMI_AUTO
         dwsProfile = DwsNavigationProfile.fromPreferenceForAccess(
-            settings.getString("dws_profile", null), supporterLicense != null)
+            settings.getString("dws_profile", null), true)
+
         AutomationState.dwsNavigationSettings = dwsProfile.settings()
         AutomationState.autoRunnerEnabled = false
         AutomationState.mode = automationMode
         autoNetworkDefense = settings.getBoolean("auto_network_defense", false)
         quickOverlayEnabled = settings.getBoolean("quick_overlay_enabled", false)
         quickStatusVisible = settings.getBoolean("director_card_visible", true)
-        // The service outlives the Activity. Restore transiently hidden overlays when the user
-        // opens the main app again, without requiring an Accessibility reconnect.
+
         DigiWorldAccessibilityService.instance?.apply {
             setQuickControlsEnabled(quickOverlayEnabled)
             setQuickStatusVisible(quickStatusVisible)
@@ -539,7 +537,9 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable private fun ControlScreen(status: UiStatus, capture: Boolean, auto: Boolean, grid: Boolean, autoPurchase: Boolean, autoDungeon: Boolean, autoNetworkDefense: Boolean, autoFeed: Boolean, autoRunner: Boolean, automationMode: AutomationMode, dwsProfile: DwsNavigationProfile, legacyCapture: Boolean, summonTouchCorrection: Boolean, preReleaseUpdates: Boolean, darkMode: Boolean, quickOverlayEnabled: Boolean, quickStatusVisible: Boolean, supporterLicense: SupporterLicense?, access: Boolean, overlay: Boolean, batteryExempt: Boolean, update: UpdateStatus, updateVersion: String, onAccess: () -> Unit, onOverlay: () -> Unit, onBattery: () -> Unit, onGrid: () -> Unit, onAutoPurchase: (Boolean) -> Unit, onAutoDungeon: (Boolean) -> Unit, onAutoNetworkDefense: (Boolean) -> Unit, onAutoFeed: (Boolean) -> Unit, onAutoRunner: (Boolean) -> Unit, onAutomationMode: (AutomationMode) -> Unit, onDwsSettings: (DwsNavigationProfile) -> Unit, onLegacyCapture: (Boolean) -> Unit, onSummonTouchCorrection: (Boolean) -> Unit, onPreReleaseUpdates: (Boolean) -> Unit, onDarkMode: (Boolean) -> Unit, onQuickOverlay: (Boolean) -> Unit, onQuickStatus: (Boolean) -> Unit, onStart: () -> Unit, onReturnToGame: () -> Unit, onStop: () -> Unit, onLanguage: (String) -> Unit, onCheckUpdate: () -> Unit, onOpenUpdate: () -> Unit, onDonate: () -> Unit, onLicense: () -> Unit, onRepo: () -> Unit, onContact: () -> Unit, onCommunity: () -> Unit) {
+@Composable private fun ControlScreen(
+    status: UiStatus, capture: Boolean, auto: Boolean, grid: Boolean, autoPurchase: Boolean, autoDungeon: Boolean, autoNetworkDefense: Boolean, autoFeed: Boolean, autoRunner: Boolean, automationMode: AutomationMode, dwsProfile: DwsNavigationProfile, legacyCapture: Boolean, summonTouchCorrection: Boolean, preReleaseUpdates: Boolean, darkMode: Boolean, quickOverlayEnabled: Boolean, quickStatusVisible: Boolean, supporterLicense: SupporterLicense?, access: Boolean, overlay: Boolean, batteryExempt: Boolean, update: UpdateStatus, updateVersion: String, onAccess: () -> Unit, onOverlay: () -> Unit, onBattery: () -> Unit, onGrid: () -> Unit, onAutoPurchase: (Boolean) -> Unit, onAutoDungeon: (Boolean) -> Unit, onAutoNetworkDefense: (Boolean) -> Unit, onAutoFeed: (Boolean) -> Unit, onAutoRunner: (Boolean) -> Unit, onAutomationMode: (AutomationMode) -> Unit, onDwsSettings: (DwsNavigationProfile) -> Unit, onLegacyCapture: (Boolean) -> Unit, onSummonTouchCorrection: (Boolean) -> Unit, onPreReleaseUpdates: (Boolean) -> Unit, onDarkMode: (Boolean) -> Unit, onQuickOverlay: (Boolean) -> Unit, onQuickStatus: (Boolean) -> Unit, onStart: () -> Unit, onReturnToGame: () -> Unit, onStop: () -> Unit, onLanguage: (String) -> Unit, onCheckUpdate: () -> Unit, onOpenUpdate: () -> Unit, onDonate: () -> Unit, onLicense: () -> Unit, onRepo: () -> Unit, onContact: () -> Unit, onCommunity: () -> Unit
+) {
     var showAccessHelp by remember { mutableStateOf(false) }
     var setupExpanded by remember { mutableStateOf(!(access && overlay && batteryExempt)) }
     var featureHelp by remember { mutableStateOf<Int?>(null) }
@@ -549,7 +549,7 @@ class MainActivity : ComponentActivity() {
     var showDwsSettings by remember { mutableStateOf(false) }
     var showGlobalSettings by remember { mutableStateOf(false) }
     val statusText = when (status) { UiStatus.READY -> R.string.status_ready; UiStatus.CAPTURING -> R.string.status_capture; UiStatus.AUTOMATIC -> R.string.status_auto; UiStatus.CAPTURE_DENIED -> R.string.status_capture_denied; UiStatus.STOPPED -> R.string.status_stopped }
-if (showAccessHelp) TroubleshootingAssistantDialog(
+    if (showAccessHelp) TroubleshootingAssistantDialog(
         access = access,
         overlay = overlay,
         batteryExempt = batteryExempt,
@@ -566,7 +566,8 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
         onClose = { showAccessHelp = false },
     )
     featureHelp?.let { FeatureHelpDialog(it, onClose = { featureHelp = null }) }
-    if (showDwsSettings) DwsSettingsDialog(dwsProfile, supporterLicense != null, onDwsSettings, onUnlock = onLicense, onClose = { showDwsSettings = false })
+    // Membuka UI dialog DWS secara penuh (unlocked = true)
+    if (showDwsSettings) DwsSettingsDialog(dwsProfile, true, onDwsSettings, onUnlock = onLicense, onClose = { showDwsSettings = false })
     if (showExperimental) ExperimentalSettingsDialog(legacyCapture, summonTouchCorrection, preReleaseUpdates, onLegacyCapture, onSummonTouchCorrection, onPreReleaseUpdates, onClose = { showExperimental = false })
     if (showGlobalSettings) GlobalSettingsDialog(
         grid = grid,
@@ -575,7 +576,7 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
         autoDungeon = autoDungeon,
         autoNetworkDefense = autoNetworkDefense,
         autoFeed = autoFeed,
-        supporterUnlocked = supporterLicense != null,
+        supporterUnlocked = true, // Selalu aktifkan fitur supporter di Global Settings
         onGrid = onGrid,
         onAutoPurchase = onAutoPurchase,
         onAutoDungeon = onAutoDungeon,
@@ -718,7 +719,7 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
         FeatureSwitch(R.string.auto_dungeon, autoDungeon, onAutoDungeon, onHelp = { featureHelp = 1 })
         FeatureSwitch(R.string.auto_network_defense, autoNetworkDefense, onAutoNetworkDefense, onHelp = { featureHelp = 3 })
         BetaAutomationBlock(
-            unlocked = supporterLicense != null,
+            unlocked = true, // Selalu tandai unlocked = true di tampilan UI
             onUnlock = onLicense,
             onSettings = { showGlobalSettings = true },
             onHelp = { featureHelp = it },
@@ -789,7 +790,7 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
     onHelp: (Int) -> Unit,
 ) {
     Surface(
-        modifier = Modifier.fillMaxWidth().clickable(enabled = !unlocked) { onUnlock() },
+        modifier = Modifier.fillMaxWidth(),
         color = betaContainerColor(),
         contentColor = betaContentColor(),
         shape = RoundedCornerShape(12.dp),
@@ -801,14 +802,14 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
                 BetaChip()
             }
             Text(
-                stringResource(if (unlocked) R.string.beta_automation_unlocked_hint else R.string.beta_automation_locked_hint),
+                stringResource(R.string.beta_automation_unlocked_hint),
                 style = MaterialTheme.typography.labelSmall,
                 color = betaContentColor().copy(alpha = .78f),
             )
-            BetaFeatureCompactRow(stringResource(R.string.digi_copilot_title), stringResource(R.string.digi_copilot_summary), unlocked, onSettings, { onHelp(7) })
-            BetaFeatureCompactRow(stringResource(R.string.dungeon_copilot_title), stringResource(R.string.dungeon_copilot_summary), unlocked, onSettings, { onHelp(1) })
-            BetaFeatureCompactRow(stringResource(R.string.bond_rotation_title), stringResource(R.string.bond_rotation_summary), unlocked, onSettings, { onHelp(5) })
-            BetaFeatureCompactRow(stringResource(R.string.meat_field_title), stringResource(R.string.meat_field_summary), unlocked, onSettings, { onHelp(8) })
+            BetaFeatureCompactRow(stringResource(R.string.digi_copilot_title), stringResource(R.string.digi_copilot_summary), true, onSettings, { onHelp(7) })
+            BetaFeatureCompactRow(stringResource(R.string.dungeon_copilot_title), stringResource(R.string.dungeon_copilot_summary), true, onSettings, { onHelp(1) })
+            BetaFeatureCompactRow(stringResource(R.string.bond_rotation_title), stringResource(R.string.bond_rotation_summary), true, onSettings, { onHelp(5) })
+            BetaFeatureCompactRow(stringResource(R.string.meat_field_title), stringResource(R.string.meat_field_summary), true, onSettings, { onHelp(8) })
         }
     }
 }
@@ -828,7 +829,7 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
             Text(title, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
             Text(hint, style = MaterialTheme.typography.labelSmall, color = betaContentColor().copy(alpha = .72f), maxLines = 1)
         }
-        IconButton(onClick = onSettings, enabled = unlocked, modifier = Modifier.size(34.dp)) { Text("⚙", fontSize = 17.sp) }
+        IconButton(onClick = onSettings, enabled = true, modifier = Modifier.size(34.dp)) { Text("⚙", fontSize = 17.sp) }
         IconButton(onClick = onHelp, modifier = Modifier.size(34.dp)) { Text("?", fontWeight = FontWeight.Bold) }
     }
 }
@@ -836,9 +837,9 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
 @Composable private fun BondRotationMainSwitch(betaUnlocked: Boolean, onUnlock: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val preferences = remember { context.getSharedPreferences("settings", Context.MODE_PRIVATE) }
-    var checked by remember(betaUnlocked) { mutableStateOf(betaUnlocked && preferences.getBoolean("auto_bond_rotation", true)) }
+    var checked by remember { mutableStateOf(preferences.getBoolean("auto_bond_rotation", true)) }
     Surface(
-        modifier = Modifier.fillMaxWidth().clickable { if (!betaUnlocked) onUnlock() },
+        modifier = Modifier.fillMaxWidth(),
         color = betaContainerColor(),
         shape = RoundedCornerShape(10.dp),
         border = BorderStroke(1.dp, betaBorderColor()),
@@ -847,7 +848,7 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
             Text(stringResource(R.string.auto_bond_rotation), modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
             BetaChip()
             Spacer(Modifier.width(6.dp))
-            Switch(checked = checked, enabled = betaUnlocked, onCheckedChange = {
+            Switch(checked = checked, enabled = true, onCheckedChange = {
                 checked = it
                 AutomationState.autoBondRotationEnabled = it
                 preferences.edit().putBoolean("auto_bond_rotation", it).apply()
@@ -907,7 +908,7 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
                     Text(stringResource(R.string.settings_beta_hint), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     de.robinthor.digiworldexplorer.dungeon.DungeonSettings(autoDungeon, onAutoDungeon, showEnabled = false)
                     HorizontalDivider()
-                    de.robinthor.digiworldexplorer.farm.FarmSettings(showEnabled = false, betaUnlocked = supporterUnlocked)
+                    de.robinthor.digiworldexplorer.farm.FarmSettings(showEnabled = false, betaUnlocked = true)
                 }
                 OutlinedButton(onClick = onExperimental, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(vertical = 5.dp)) {
                     Text(stringResource(R.string.experimental_settings), style = MaterialTheme.typography.labelLarge)
@@ -1083,6 +1084,7 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
         Text("›", style = MaterialTheme.typography.titleMedium)
     }
 }
+
 @Composable private fun DwsSettingsDialog(
     profile: DwsNavigationProfile,
     supporterUnlocked: Boolean,
@@ -1104,26 +1106,23 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
                     Triple(DwsNavigationProfile.V5_ALL_SPRITES, R.string.dws_profile_v5, R.string.dws_profile_v5_hint),
                 ).forEach { (choice, title, hint) ->
                     Row(
-                        Modifier.fillMaxWidth().clickable(enabled = choice.availableFor(supporterUnlocked)) { onSettings(choice) },
+                        Modifier.fillMaxWidth().clickable(enabled = true) { onSettings(choice) },
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         RadioButton(selected = profile == choice, onClick = { onSettings(choice) },
-                            enabled = choice.availableFor(supporterUnlocked))
+                            enabled = true)
                         Column(Modifier.weight(1f)) {
                             Text(stringResource(title), fontWeight = FontWeight.SemiBold)
                             Text(stringResource(hint), style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
-                if (!supporterUnlocked) {
-                    OutlinedButton(onClick = onUnlock, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.dws_unlock_options)) }
-                }
-
             }
         },
         confirmButton = { Button(onClick = onClose) { Text(stringResource(R.string.close)) } },
     )
 }
+
 @Composable private fun CompactStatusCard(statusText: Int, modifier: Modifier = Modifier) {
     Card(modifier) { Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) { Text(stringResource(R.string.status_title), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold); Text(stringResource(statusText), style = MaterialTheme.typography.labelSmall, maxLines = 2) } }
 }
@@ -1193,6 +1192,7 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
         IconButton(onClick = onHelp, modifier = Modifier.size(36.dp)) { Text("?", fontWeight = FontWeight.Bold) }
     }
 }
+
 @Composable private fun ComingSoonFeatureRow(onHelp: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(start = 10.dp, end = 2.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1243,6 +1243,7 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
         dismissButton = { TextButton(onClick = onDonate) { Text(stringResource(R.string.support_prompt_donate)) } },
     )
 }
+
 @Composable private fun FeedDelayNoticeDialog(onClose: () -> Unit) {
     AlertDialog(
         onDismissRequest = onClose,
@@ -1251,6 +1252,7 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
         confirmButton = { Button(onClick = onClose) { Text(stringResource(R.string.close)) } },
     )
 }
+
 @Composable private fun ReleaseNotesDialog(onClose: () -> Unit) {
     AlertDialog(
         onDismissRequest = onClose,
@@ -1270,6 +1272,7 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
         dismissButton = { TextButton(onClick = onClose) { Text(stringResource(R.string.close)) } },
     )
 }
+
 @Composable private fun UpdateAvailableDialog(version: String, onUpdate: () -> Unit, onLater: () -> Unit) {
     AlertDialog(
         onDismissRequest = onLater,
@@ -1279,6 +1282,7 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
         dismissButton = { TextButton(onClick = onLater) { Text(stringResource(R.string.update_notice_later)) } },
     )
 }
+
 @Composable private fun PaymentContactDialog(onContinue: () -> Unit, onClose: () -> Unit) {
     AlertDialog(
         onDismissRequest = onClose,
@@ -1351,6 +1355,7 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
 
 @Composable private fun betaBorderColor(): Color =
     if (MaterialTheme.colorScheme.background.luminance() < .45f) Color(0xFFB98B25) else Color(0xFFD69B13)
+
 @Composable private fun SupporterLicenseDialog(
     currentLicense: SupporterLicense?,
     onActivate: (String) -> Boolean,
@@ -1424,6 +1429,7 @@ if (showAccessHelp) TroubleshootingAssistantDialog(
         },
     )
 }
+
 @Composable private fun ExperimentalSettingsDialog(
     legacyCapture: Boolean,
     summonTouchCorrection: Boolean,
