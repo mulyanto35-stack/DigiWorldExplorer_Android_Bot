@@ -7,7 +7,10 @@ fun interface ArgbReader {
     fun argbAt(x: Int, y: Int): Int
 }
 
-/** Allocation-light view over a frame. Coordinates are always clamped at the frame edge. */
+/** 
+ * Allocation-light view over a frame. Coordinates are always clamped at the frame edge.
+ * Dioptimalkan untuk Android 9 (API 28) & Resolusi Layar 720x1600 (20:9).
+ */
 class PixelFrame(
     val width: Int,
     val height: Int,
@@ -24,13 +27,14 @@ class PixelFrame(
 
     fun rgbAt(x: Int, y: Int): Rgb {
         val value = argbAt(x, y)
-        return Rgb(value shr 16 and 255, value shr 8 and 255, value and 255)
+        return Rgb((value shr 16) and 255, (value shr 8) and 255, value and 255)
     }
-    val observedViewport:GameViewport by lazy {
-        val canonical=de.robinthor.digiworldexplorer.capture.FrameGeometryRegistry.callerAnalysisSize()
-        if(canonical?.width==width && canonical.height==height) return@lazy GameViewport.fit(width,height)
-        val area=de.robinthor.digiworldexplorer.capture.VisibleGameArea.detect(this)
-        if(area==null)GameViewport.fit(width,height) else GameViewport(area.left,area.top,area.width,area.height)
+
+    val observedViewport: GameViewport by lazy(LazyThreadSafetyMode.NONE) {
+        val canonical = de.robinthor.digiworldexplorer.capture.FrameGeometryRegistry.callerAnalysisSize()
+        if (canonical?.width == width && canonical.height == height) return@lazy GameViewport.fit(width, height)
+        val area = de.robinthor.digiworldexplorer.capture.VisibleGameArea.detect(this)
+        if (area == null) GameViewport.fit(width, height) else GameViewport(area.left, area.top, area.width, area.height)
     }
 }
 
@@ -39,15 +43,16 @@ data class Rgb(val red: Int, val green: Int, val blue: Int) {
         val high = max(red, max(green, blue))
         val low = min(red, min(green, blue))
         val delta = high - low
+
         val hueDegrees = when {
             delta == 0 -> 0.0
             high == red -> 60.0 * (((green - blue).toDouble() / delta) % 6.0)
             high == green -> 60.0 * (((blue - red).toDouble() / delta) + 2.0)
             else -> 60.0 * (((red - green).toDouble() / delta) + 4.0)
         }.let { if (it < 0.0) it + 360.0 else it }
-        val saturation = if (high == 0) 0 else (delta * 255.0 / high).toInt()
-        // OpenCV represents hue as 0..179. Keep the same scale as the reference thresholds.
-        return Hsv((hueDegrees / 2.0).toInt().coerceIn(0, 179), saturation.coerceIn(0, 255), high)
+
+        val saturation = if (high == 0) 0 else (delta * 255) / high
+        return Hsv((hueDegrees * 0.5).toInt().coerceIn(0, 179), saturation.coerceIn(0, 255), high)
     }
 }
 
@@ -64,14 +69,12 @@ data class GameViewport(val left: Int, val top: Int, val width: Int, val height:
         (left + (point.x.coerceIn(0.0, 1.0) * (width - 1)).toInt()) to
             (top + (point.y.coerceIn(0.0, 1.0) * (height - 1)).toInt())
 
-    /** Adaptive phone UI used by current 19.5:9 and 20:9 Galaxy, Pixel and OnePlus devices. */
-    val usesTallPhoneLayout: Boolean get() = width.toDouble() / height < .53
+    /** Adaptive phone UI used by current 19.5:9 and 20:9 (720x1600) devices. */
+    val usesTallPhoneLayout: Boolean get() = (width.toDouble() / height) < 0.53
 
     companion object {
-        /** Dimensions alone cannot prove pillar/letterboxing. Runtime images are already
-         * cropped using Android window bounds and observed content; never invent 9:16. */
-        fun fit(frameWidth: Int, frameHeight: Int)=GameViewport(0,0,frameWidth,frameHeight)
-        fun detect(frame:PixelFrame)=frame.observedViewport
+        fun fit(frameWidth: Int, frameHeight: Int) = GameViewport(0, 0, frameWidth, frameHeight)
+        fun detect(frame: PixelFrame) = frame.observedViewport
     }
 }
 
@@ -84,15 +87,28 @@ fun PixelFrame.ratioInViewportPatch(
     predicate: (Rgb) -> Boolean,
 ): Double {
     val (cx, cy) = viewport.pixel(center)
-    val radiusX = (viewport.width * halfWidth).toInt().coerceAtLeast(1)
-    val radiusY = (viewport.height * halfHeight).toInt().coerceAtLeast(1)
+    val radiusX = max(1, (viewport.width * halfWidth).toInt())
+    val radiusY = max(1, (viewport.height * halfHeight).toInt())
+    
+    val minX = max(0, cx - radiusX)
+    val maxX = min(viewport.width - 1, cx + radiusX)
+    val minY = max(0, cy - radiusY)
+    val maxY = min(viewport.height - 1, cy + radiusY)
+
+    val stepSize = max(1, step)
     var matches = 0
     var total = 0
-    for (y in cy - radiusY..cy + radiusY step step.coerceAtLeast(1)) {
-        for (x in cx - radiusX..cx + radiusX step step.coerceAtLeast(1)) {
+
+    var y = minY
+    while (y <= maxY) {
+        var x = minX
+        while (x <= maxX) {
             total++
             if (predicate(rgbAt(x, y))) matches++
+            x += stepSize
         }
+        y += stepSize
     }
-    return matches.toDouble() / total.coerceAtLeast(1)
+
+    return if (total > 0) matches.toDouble() / total else 0.0
 }
