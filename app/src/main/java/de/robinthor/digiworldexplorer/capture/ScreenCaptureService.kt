@@ -25,28 +25,28 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import de.robinthor.digiworldexplorer.R
 import de.robinthor.digiworldexplorer.accessibility.DigiWorldAccessibilityService
+import de.robinthor.digiworldexplorer.automation.AutomationEventKind
+import de.robinthor.digiworldexplorer.automation.AutomationEventLog
+import de.robinthor.digiworldexplorer.automation.BondCycleTimer
+import de.robinthor.digiworldexplorer.automation.DigiCopilotRequest
+import de.robinthor.digiworldexplorer.automation.DwsExcursionAnalyzer
+import de.robinthor.digiworldexplorer.automation.DwsExcursionRequest
 import de.robinthor.digiworldexplorer.automation.FrameOrchestrator
 import de.robinthor.digiworldexplorer.automation.FrameOwner
 import de.robinthor.digiworldexplorer.automation.FrameProbe
 import de.robinthor.digiworldexplorer.automation.FrameProbePolicy
-import de.robinthor.digiworldexplorer.automation.AutomationEventKind
-import de.robinthor.digiworldexplorer.automation.AutomationEventLog
-import de.robinthor.digiworldexplorer.automation.ScreenDirector
-import de.robinthor.digiworldexplorer.automation.PassiveScreenClassifier
-import de.robinthor.digiworldexplorer.automation.ObservedScreen
 import de.robinthor.digiworldexplorer.automation.GameEntryAnalyzer
 import de.robinthor.digiworldexplorer.automation.HomeIdleRewardAnalyzer
 import de.robinthor.digiworldexplorer.automation.HomeIdleRewardRequest
-import de.robinthor.digiworldexplorer.automation.DwsExcursionAnalyzer
-import de.robinthor.digiworldexplorer.automation.DwsExcursionRequest
-import de.robinthor.digiworldexplorer.automation.DigiCopilotRequest
-import de.robinthor.digiworldexplorer.automation.BondCycleTimer
-import de.robinthor.digiworldexplorer.purchase.RewardPurchaseFrameAnalyzer
-import de.robinthor.digiworldexplorer.feed.FeedFrameAnalyzer
+import de.robinthor.digiworldexplorer.automation.ObservedScreen
+import de.robinthor.digiworldexplorer.automation.PassiveScreenClassifier
+import de.robinthor.digiworldexplorer.automation.ScreenDirector
+import de.robinthor.digiworldexplorer.dungeon.DungeonFrameAnalyzer
 import de.robinthor.digiworldexplorer.feed.BondRotationAnalyzer
+import de.robinthor.digiworldexplorer.feed.FeedFrameAnalyzer
 import de.robinthor.digiworldexplorer.feed.StageFailedFrameAnalyzer
 import de.robinthor.digiworldexplorer.network.NetworkDefenseFrameAnalyzer
-import de.robinthor.digiworldexplorer.dungeon.DungeonFrameAnalyzer
+import de.robinthor.digiworldexplorer.purchase.RewardPurchaseFrameAnalyzer
 import de.robinthor.digiworldexplorer.runner.GekkomonRunFrameAnalyzer
 import de.robinthor.digiworldexplorer.strategy.AutomationState
 
@@ -68,18 +68,24 @@ class ScreenCaptureService : Service() {
     private var lastDirectorSnapshot = ScreenDirector.snapshot()
     private var passiveScreen = ObservedScreen.UNKNOWN
     @Volatile private var shuttingDown = false
-    private var frameScratch:java.nio.ByteBuffer?=null
-    private var observedGeneration=-1L
-    private var captureDensity=0
-    private var geometryPendingSince=0L
-    private val displayListener=object:DisplayManager.DisplayListener {
-        override fun onDisplayAdded(displayId:Int)=Unit
-        override fun onDisplayRemoved(displayId:Int)=Unit
-        override fun onDisplayChanged(displayId:Int) { if(displayId==android.view.Display.DEFAULT_DISPLAY)refreshCaptureSize() }
+    private var frameScratch: java.nio.ByteBuffer? = null
+    private var observedGeneration = -1L
+    private var captureDensity = 0
+    private var geometryPendingSince = 0L
+
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId == android.view.Display.DEFAULT_DISPLAY) refreshCaptureSize()
+        }
     }
 
     private val projectionCallback = object : MediaProjection.Callback() {
-        override fun onCapturedContentResize(width:Int,height:Int) { requestCaptureResize(width,height) }
+        override fun onCapturedContentResize(width: Int, height: Int) {
+            requestCaptureResize(width, height)
+        }
+
         override fun onStop() {
             android.util.Log.w("DigiWorldCapture", "MediaProjection stopped by system or user")
             releaseCapture()
@@ -91,89 +97,132 @@ class ScreenCaptureService : Service() {
         super.onCreate()
         de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.initialize(this)
         de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.record("CAPTURE", "service created")
-        de.robinthor.digiworldexplorer.automation.BondCycleTimer.initialize(this)
+        BondCycleTimer.initialize(this)
         createNotificationChannel()
     }
 
-    override fun onConfigurationChanged(newConfig:android.content.res.Configuration) {
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
         resetGeometry()
         refreshCaptureSize()
     }
 
-    private val contentStability=GameContentStability()
-    private fun resetGeometry() { contentStability.reset();FrameGeometryRegistry.calibration.reset() }
-    private fun physicalDisplay()=PhysicalDisplay.bounds(this,AutomationState.forceLegacyCaptureMetrics)
+    private val contentStability = GameContentStability()
+
+    private fun resetGeometry() {
+        contentStability.reset()
+        FrameGeometryRegistry.calibration.reset()
+    }
+
+    private fun physicalDisplay() = PhysicalDisplay.bounds(this, AutomationState.forceLegacyCaptureMetrics)
+
     private fun refreshCaptureSize() {
-        if(projection==null || shuttingDown)return
-        val size=physicalDisplay();requestCaptureResize(size.width,size.height)
+        if (projection == null || shuttingDown) return
+        val size = physicalDisplay()
+        requestCaptureResize(size.width, size.height)
     }
-    private fun requestCaptureResize(width:Int,height:Int) {
-        val handler=captureThread?.looper?.let { Handler(it) } ?: return
+
+    private fun requestCaptureResize(width: Int, height: Int) {
+        val handler = captureThread?.looper?.let { Handler(it) } ?: return
         handler.post {
-            val display=virtualDisplay ?: return@post
-            if(shuttingDown || width<1 || height<1)return@post
-            val density=resources.configuration.densityDpi
-            if(imageReader?.width==width && imageReader?.height==height && captureDensity==density)return@post
-            resetGeometry();CaptureFrameAnalyzer.resetCalibration()
-            val previous=imageReader
-            val next=createReader(width,height)
-            display.resize(width,height,density)
-            captureDensity=density
-            display.surface=next.surface
-            imageReader=next
-            previous?.setOnImageAvailableListener(null,null);previous?.close()
-            frameScratch=null
-            de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.record("GEOMETRY.RESIZE","surface=${width}x$height")
+            val display = virtualDisplay ?: return@post
+            if (shuttingDown || width < 1 || height < 1) return@post
+            val density = resources.configuration.densityDpi
+            if (imageReader?.width == width && imageReader?.height == height && captureDensity == density) return@post
+
+            resetGeometry()
+            CaptureFrameAnalyzer.resetCalibration()
+            val previous = imageReader
+            val next = createReader(width, height)
+            display.resize(width, height, density)
+            captureDensity = density
+            display.surface = next.surface
+            imageReader = next
+            previous?.setOnImageAvailableListener(null, null)
+            previous?.close()
+            frameScratch = null
+            de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.record("GEOMETRY.RESIZE", "surface=${width}x$height")
         }
     }
-    private fun observeGeometry(image:android.media.Image):GeometrySnapshot? {
-        val service=DigiWorldAccessibilityService.instance
-        if(service?.isGameForeground()!=true){
-            resetGeometry();CaptureFrameAnalyzer.resetCalibration()
-            GameEntryAnalyzer.reset();publishDirector(ObservedScreen.UNKNOWN)
+
+    @Suppress("DEPRECATION")
+    private fun observeGeometry(image: android.media.Image): GeometrySnapshot? {
+        val service = DigiWorldAccessibilityService.instance
+        if (service?.isGameForeground() != true) {
+            resetGeometry()
+            CaptureFrameAnalyzer.resetCalibration()
+            GameEntryAnalyzer.reset()
+            publishDirector(ObservedScreen.UNKNOWN)
             return null
         }
-        val display=physicalDisplay()
-        val window=service.gameWindowBounds()?.intersect(display)
-            ?: run { resetGeometry();return null }
-        val metadata=DisplayGeometry(display,window,resources.configuration.densityDpi,
-            @Suppress("DEPRECATION") getSystemService(WindowManager::class.java).defaultDisplay.rotation)
-        val size=PixelSize(image.width,image.height)
-        // Uniform fitting is guaranteed by Android from 12L onwards. On older versions
-        // a stale mismatched surface after rotation must be resized, never guessed/stretched.
-        if(Build.VERSION.SDK_INT<32 && kotlin.math.abs(size.width.toLong()*display.height-size.height.toLong()*display.width)>maxOf(display.width,display.height)*2L) {
-            resetGeometry();refreshCaptureSize();return null
+
+        val display = physicalDisplay()
+        val window = service.gameWindowBounds()?.intersect(display) ?: run {
+            resetGeometry()
+            return null
         }
-        val projected=ProjectionTransform(size,display).captureRect(window) ?: run {resetGeometry();return null}
-        val plane=image.planes.firstOrNull() ?: run {resetGeometry();return null}
-        val data=plane.buffer
-        val required=(image.height-1L)*plane.rowStride+(image.width-1L)*plane.pixelStride+3
-        if(plane.pixelStride<4 || required>=data.limit()) { resetGeometry();return null }
-        val pixels=de.robinthor.digiworldexplorer.vision.PixelFrame(image.width,image.height) { x,y ->
-            val at=y*plane.rowStride+x*plane.pixelStride
-            Color.rgb(data.get(at).toInt() and 255,data.get(at+1).toInt() and 255,data.get(at+2).toInt() and 255)
+
+        val metadata = DisplayGeometry(
+            display, window, resources.configuration.densityDpi,
+            getSystemService(WindowManager::class.java).defaultDisplay.rotation
+        )
+        val size = PixelSize(image.width, image.height)
+
+        if (Build.VERSION.SDK_INT < 32 && kotlin.math.abs(size.width.toLong() * display.height - size.height.toLong() * display.width) > maxOf(display.width, display.height) * 2L) {
+            resetGeometry()
+            refreshCaptureSize()
+            return null
         }
-        val transform=ProjectionTransform(size,display)
-        val occlusions=service.controlOverlayBounds().mapNotNull { transform.captureRect(it) }.map {
-            PixelRect(maxOf(0,it.left-2),maxOf(0,it.top-2),minOf(size.width,it.right+2),minOf(size.height,it.bottom+2))
+
+        val projected = ProjectionTransform(size, display).captureRect(window) ?: run {
+            resetGeometry()
+            return null
         }
-        val content=VisibleGameArea.detect(pixels,projected,occlusions)
-        val now=SystemClock.elapsedRealtime()
-        val geometry=contentStability.observe(content?.let { FrameGeometry(size,metadata,it) },now)
-        val snapshot=FrameGeometryRegistry.calibration.observe(geometry,now)
-        if(snapshot==null){
+        val plane = image.planes.firstOrNull() ?: run {
+            resetGeometry()
+            return null
+        }
+        val data = plane.buffer
+        val required = (image.height - 1L) * plane.rowStride + (image.width - 1L) * plane.pixelStride + 3
+        if (plane.pixelStride < 4 || required >= data.limit()) {
+            resetGeometry()
+            return null
+        }
+
+        val pixels = de.robinthor.digiworldexplorer.vision.PixelFrame(image.width, image.height) { x, y ->
+            val at = y * plane.rowStride + x * plane.pixelStride
+            Color.rgb(data.get(at).toInt() and 255, data.get(at + 1).toInt() and 255, data.get(at + 2).toInt() and 255)
+        }
+
+        val transform = ProjectionTransform(size, display)
+        val occlusions = service.controlOverlayBounds().mapNotNull { transform.captureRect(it) }.map {
+            PixelRect(maxOf(0, it.left - 2), maxOf(0, it.top - 2), minOf(size.width, it.right + 2), minOf(size.height, it.bottom + 2))
+        }
+
+        val content = VisibleGameArea.detect(pixels, projected, occlusions)
+        val now = SystemClock.elapsedRealtime()
+        val geometry = contentStability.observe(content?.let { FrameGeometry(size, metadata, it) }, now)
+        val snapshot = FrameGeometryRegistry.calibration.observe(geometry, now)
+
+        if (snapshot == null) {
             CaptureFrameAnalyzer.resetCalibration()
             return null
         }
-        if(snapshot.generation!=observedGeneration) {
-            observedGeneration=snapshot.generation
+
+        if (snapshot.generation != observedGeneration) {
+            observedGeneration = snapshot.generation
             CaptureFrameAnalyzer.resetCalibration()
-            val details=mapOf("generation" to "${snapshot.generation}","capture" to "$size",
-                "display" to "$metadata","gameInCapture" to "${geometry!!.gameInCapture}","analysis" to "${geometry.analysisSize}",
-                "displayOrigin" to "${geometry.displayOrigin}","scaleToDisplay" to "${geometry.scaleToDisplay}")
+            val details = mapOf(
+                "generation" to "${snapshot.generation}",
+                "capture" to "$size",
+                "display" to "$metadata",
+                "gameInCapture" to "${geometry!!.gameInCapture}",
+                "analysis" to "${geometry.analysisSize}",
+                "displayOrigin" to "${geometry.displayOrigin}",
+                "scaleToDisplay" to "${geometry.scaleToDisplay}"
+            )
             de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.recordCalibration(details)
-            de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.record("GEOMETRY.CONFIRMED","generation=${snapshot.generation} capture=${size.width}x${size.height} analysis=${geometry.analysisSize.width}x${geometry.analysisSize.height} crop=${geometry.gameInCapture} origin=${geometry.displayOrigin} scale=${geometry.scaleToDisplay}")
+            de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.record("GEOMETRY.CONFIRMED", "generation=${snapshot.generation} capture=${size.width}x${size.height} analysis=${geometry.analysisSize.width}x${geometry.analysisSize.height} crop=${geometry.gameInCapture} origin=${geometry.displayOrigin} scale=${geometry.scaleToDisplay}")
         }
         return snapshot
     }
@@ -193,7 +242,11 @@ class ScreenCaptureService : Service() {
                 stopSelf()
                 return START_NOT_STICKY
             }
-            ACTION_AUTO_ON -> { AutomationState.enabled=true; startCaptureForeground(); return START_NOT_STICKY }
+            ACTION_AUTO_ON -> {
+                AutomationState.enabled = true
+                startCaptureForeground()
+                return START_NOT_STICKY
+            }
             ACTION_STUCK -> {
                 AutomationState.enabled = false
                 AutomationState.overlayEnabled = false
@@ -205,9 +258,9 @@ class ScreenCaptureService : Service() {
         }
 
         startCaptureForeground()
-        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, Int.MIN_VALUE)
-            ?: return START_NOT_STICKY
+        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, Int.MIN_VALUE) ?: return START_NOT_STICKY
         val resultData = intent.intentExtra(EXTRA_RESULT_DATA) ?: return START_NOT_STICKY
+
         if (projection == null) {
             beginCapture(resultCode, resultData)
         }
@@ -215,24 +268,31 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onDestroy() {
-        AutomationState.stop(); releaseCapture(); super.onDestroy()
+        AutomationState.stop()
+        releaseCapture()
+        super.onDestroy()
     }
-    override fun onTaskRemoved(rootIntent: Intent?) { AutomationState.stop(); releaseCapture(); stopSelf(); super.onTaskRemoved(rootIntent) }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        AutomationState.stop()
+        releaseCapture()
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun startCaptureForeground() {
         val stopIntent = Intent(this, ScreenCaptureService::class.java).setAction(ACTION_STOP)
         val stopPendingIntent = android.app.PendingIntent.getService(
-            this,
-            1,
-            stopIntent,
+            this, 1, stopIntent,
             android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val autoOffPendingIntent = android.app.PendingIntent.getService(
             this, 2, Intent(this, ScreenCaptureService::class.java).setAction(ACTION_AUTO_OFF),
             android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT,
         )
+
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentTitle(getString(R.string.app_name))
@@ -241,20 +301,20 @@ class ScreenCaptureService : Service() {
             .addAction(0, getString(R.string.notification_auto_stop), autoOffPendingIntent)
             .addAction(0, getString(R.string.auto_stop), stopPendingIntent)
             .build()
+
+        // Penyesuaian Android 9 (API 28): Tipe ServiceInfo khusus hanya digunakan pada API 29+
         if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
-            )
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun beginCapture(resultCode: Int, resultData: Intent) {
         shuttingDown = false
-        resetGeometry();observedGeneration=-1L
+        resetGeometry()
+        observedGeneration = -1L
         CaptureFrameAnalyzer.resetCalibration()
         lastRecognizedContent = SystemClock.elapsedRealtime()
         missingStatusShown = false
@@ -266,6 +326,7 @@ class ScreenCaptureService : Service() {
         passiveScreen = ObservedScreen.UNKNOWN
         AutomationEventLog.clear()
         AutomationEventLog.record(AutomationEventKind.CAPTURE_STARTED, "CAPTURE_STARTED")
+
         val manager = getSystemService(MediaProjectionManager::class.java)
         val mediaProjection = manager.getMediaProjection(resultCode, resultData)
         if (mediaProjection == null) {
@@ -278,8 +339,9 @@ class ScreenCaptureService : Service() {
         val useLegacyMetrics = Build.VERSION.SDK_INT < 30 || AutomationState.forceLegacyCaptureMetrics
         val width: Int
         val height: Int
+
         if (useLegacyMetrics) {
-            val bounds=physicalDisplay()
+            val bounds = physicalDisplay()
             width = bounds.width
             height = bounds.height
         } else {
@@ -287,236 +349,181 @@ class ScreenCaptureService : Service() {
             width = bounds.width().coerceAtLeast(1)
             height = bounds.height().coerceAtLeast(1)
         }
+
         val density = displayMetrics.densityDpi
         de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.snapshotContext(
-            "capture-start", mapOf("captureWidth" to "$width", "captureHeight" to "$height",
-                "densityDpi" to "$density", "metricsMode" to if (useLegacyMetrics) "legacy" else "currentWindow"))
-        android.util.Log.i("DigiWorldCapture", "metrics mode=${if (useLegacyMetrics) "legacy" else "currentWindow"} ${width}x$height")
-        val thread = HandlerThread("DigiWorldAnalysis").apply { start() }
-        captureThread=thread
-        val reader=createReader(width,height)
-        val display = mediaProjection.createVirtualDisplay(
-            "DigiWorldCapture",
-            width,
-            height,
-            density,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            reader.surface,
-            null,
-            null,
+            "capture-start", mapOf("captureWidth" to "$width", "captureHeight" to "$height", "densityDpi" to "$density", "metricsMode" to if (useLegacyMetrics) "legacy" else "currentWindow")
         )
+
+        val thread = HandlerThread("DigiWorldAnalysis").apply { start() }
+        captureThread = thread
+        val reader = createReader(width, height)
+        val display = mediaProjection.createVirtualDisplay(
+            "DigiWorldCapture", width, height, density,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null
+        )
+
         projection = mediaProjection
         imageReader = reader
-        captureThread = thread
         virtualDisplay = display
-        captureDensity=density
-        getSystemService(DisplayManager::class.java).registerDisplayListener(displayListener,Handler(thread.looper))
+        captureDensity = density
+        getSystemService(DisplayManager::class.java).registerDisplayListener(displayListener, Handler(thread.looper))
         CaptureSessionState.markCaptureStarted()
-        android.util.Log.i("DigiWorldCapture", "capture started ${width}x$height density=$density display=${display != null}")
     }
 
-    private fun createReader(width:Int,height:Int):ImageReader {
-        val reader=ImageReader.newInstance(width,height,PixelFormat.RGBA_8888,2)
-        val thread=captureThread ?: error("Capture thread not started")
+    private fun createReader(width: Int, height: Int): ImageReader {
+        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        val thread = captureThread ?: error("Capture thread not started")
+
         reader.setOnImageAvailableListener({ source ->
-            if(source!==imageReader)return@setOnImageAvailableListener
-            if (shuttingDown) {
-                return@setOnImageAvailableListener
-            }
-            runCatching { source.acquireLatestImage()?.use { rawImage ->
-                val snapshot = observeGeometry(rawImage) ?: run {
-                    val now=SystemClock.elapsedRealtime()
-                    if(geometryPendingSince==0L)geometryPendingSince=now
-                    if(now-geometryPendingSince>=750 && DigiWorldAccessibilityService.instance?.isGameForeground()==true)
-                        DigiWorldAccessibilityService.instance?.showStatusOnly(getString(R.string.overlay_calibrating_geometry),sourceScreen=ObservedScreen.UNKNOWN)
-                    if(de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.isEnabled() &&
-                        DigiWorldAccessibilityService.instance?.isGameForeground()==true) {
-                        de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.record("GEOMETRY.PENDING","unconfirmed; input blocked; raw=${rawImage.width}x${rawImage.height}")
-                        val raw=AnalysisImage.from(rawImage,PixelRect(0,0,rawImage.width,rawImage.height),frameScratch)
-                        frameScratch=raw.second
-                        de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.captureIfRequested(raw.first,rawImage.width,rawImage.height)
+            if (source !== imageReader || shuttingDown) return@setOnImageAvailableListener
+
+            runCatching {
+                source.acquireLatestImage()?.use { rawImage ->
+                    val snapshot = observeGeometry(rawImage) ?: run {
+                        val now = SystemClock.elapsedRealtime()
+                        if (geometryPendingSince == 0L) geometryPendingSince = now
+                        if (now - geometryPendingSince >= 750 && DigiWorldAccessibilityService.instance?.isGameForeground() == true) {
+                            DigiWorldAccessibilityService.instance?.showStatusOnly(getString(R.string.overlay_calibrating_geometry), sourceScreen = ObservedScreen.UNKNOWN)
+                        }
+                        checkRecognitionTimeouts()
+                        return@use
                     }
-                    checkRecognitionTimeouts()
-                    return@use
-                }
-                if(geometryPendingSince>0L) {geometryPendingSince=0L;ScreenDirector.noteAction("")}
-                val normalized = AnalysisImage.from(rawImage,snapshot.geometry.gameInCapture,frameScratch)
-                frameScratch = normalized.second
-                val image = normalized.first
-                val width = image.width; val height = image.height
-                FrameGeometryRegistry.withSnapshot(snapshot) {
-                framesSeen++
-                var recognized = false
-                val featureFrame = framesSeen % 3 == 0
-                val captureBlocked = featureFrame && updateCaptureQuality(image, width, height)
-                val gameForeground = DigiWorldAccessibilityService.instance?.isGameForeground() == true
-                if (!gameForeground) {
-                    // Never classify or tap our own settings UI, the launcher, or another app.
-                    passiveScreen = ObservedScreen.UNKNOWN
-                    GameEntryAnalyzer.reset()
-                    publishDirector(ObservedScreen.UNKNOWN)
-                    recognized = false
-                } else if (captureBlocked) {
-                    recognized = captureImageMissing
-                    publishDirector(FrameOwner.CAPTURE_BLOCKED)
-                } else {
-                    val digiCopilotOwns = DigiCopilotRequest.active()
-                    val networkFrame = featureFrame || NetworkDefenseFrameAnalyzer.isSessionActive()
-                    val activeSession = when {
-                        de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest.ownsFrames() -> null
-                        BondRotationAnalyzer.ownsSession() -> FrameProbe(FrameOwner.BOND) {
-                            BondRotationAnalyzer.analyze(image, width, height)
-                        }
-                        HomeIdleRewardRequest.ownsFrames() -> FrameProbe(FrameOwner.GAME_ENTRY) {
-                            // Hold ownership on every frame, but sample this expensive visual
-                            // dialog classifier at a bounded cadence on physical devices.
-                            val now = SystemClock.elapsedRealtime()
-                            if (now - lastRewardAnalysisAt >= 300L) {
-                                lastRewardAnalysisAt = now
-                                HomeIdleRewardAnalyzer.analyze(image, width, height)
-                            } else true
-                        }
-                        !digiCopilotOwns && NetworkDefenseFrameAnalyzer.isSessionActive() ->
-                            FrameProbe(FrameOwner.NETWORK_DEFENSE) {
-                                NetworkDefenseFrameAnalyzer.analyze(image, width, height)
+
+                    if (geometryPendingSince > 0L) {
+                        geometryPendingSince = 0L
+                        ScreenDirector.noteAction("")
+                    }
+
+                    val normalized = AnalysisImage.from(rawImage, snapshot.geometry.gameInCapture, frameScratch)
+                    frameScratch = normalized.second
+                    val image = normalized.first
+                    val w = image.width
+                    val h = image.height
+
+                    FrameGeometryRegistry.withSnapshot(snapshot) {
+                        framesSeen++
+                        var recognized = false
+                        val featureFrame = framesSeen % 3 == 0
+                        val captureBlocked = featureFrame && updateCaptureQuality(image, w, h)
+                        val gameForeground = DigiWorldAccessibilityService.instance?.isGameForeground() == true
+
+                        if (!gameForeground) {
+                            passiveScreen = ObservedScreen.UNKNOWN
+                            GameEntryAnalyzer.reset()
+                            publishDirector(ObservedScreen.UNKNOWN)
+                            recognized = false
+                        } else if (captureBlocked) {
+                            recognized = captureImageMissing
+                            publishDirector(FrameOwner.CAPTURE_BLOCKED)
+                        } else {
+                            val digiCopilotOwns = DigiCopilotRequest.active()
+                            val networkFrame = featureFrame || NetworkDefenseFrameAnalyzer.isSessionActive()
+
+                            val activeSession = when {
+                                de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest.ownsFrames() -> null
+                                BondRotationAnalyzer.ownsSession() -> FrameProbe(FrameOwner.BOND) { BondRotationAnalyzer.analyze(image, w, h) }
+                                HomeIdleRewardRequest.ownsFrames() -> FrameProbe(FrameOwner.GAME_ENTRY) {
+                                    val now = SystemClock.elapsedRealtime()
+                                    if (now - lastRewardAnalysisAt >= 300L) {
+                                        lastRewardAnalysisAt = now
+                                        HomeIdleRewardAnalyzer.analyze(image, w, h)
+                                    } else true
+                                }
+                                !digiCopilotOwns && NetworkDefenseFrameAnalyzer.isSessionActive() -> FrameProbe(FrameOwner.NETWORK_DEFENSE) { NetworkDefenseFrameAnalyzer.analyze(image, w, h) }
+                                else -> null
                             }
-                        else -> null
-                    }
-                    // Classic V4 Summon must get the frame before the V5 entry/reveal guards.
-                    // Otherwise those guards either tap cards as notices or swallow animation taps.
-                    val classicSummon = !digiCopilotOwns && AutomationState.autoPurchaseEnabled &&
-                        !de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest.ownsFrames()
-                    val owner = FrameOrchestrator.withForeground(FrameProbe(FrameOwner.STAGE_FAILED) {
-                        val found=StageFailedFrameAnalyzer.analyze(image,width,height)
-                        if(found) {
-                            if(de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest.active())
-                                de.robinthor.digiworldexplorer.dungeon.DungeonRotationAnalyzer.onGrowthGuideHandled()
-                            else if(AutomationState.autoDungeonEnabled)DungeonFrameAnalyzer.onFailureDialogHandled()
-                        }
-                        found
-                    }) { if (activeSession != null) {
-                        FrameOrchestrator.resolve(false, emptyList(), activeSession)
-                    } else if (classicSummon &&
-                        RewardPurchaseFrameAnalyzer.analyze(image, width, height)) {
-                        FrameOwner.SUMMON
-                    } else if (de.robinthor.digiworldexplorer.purchase.SummonRewardFrameGuard.analyze(image, width, height)) {
-                        FrameOwner.SUMMON
-                    } else if (de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest.ownsFrames()) {
-                        // The user-started pass owns ALL frames, including settle/park frames.
-                        // Only the rotation may delegate its own reward/battle handlers.
-                        if (featureFrame && de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest.active())
-                            de.robinthor.digiworldexplorer.dungeon.DungeonRotationAnalyzer.analyze(image, width, height)
-                        FrameOwner.DUNGEON
-                    } else FrameOrchestrator.resolve(false, listOf(
-                        FrameProbe(FrameOwner.WORLD_SEARCH, enabled = featureFrame && DwsExcursionRequest.active()) {
-                            DwsExcursionAnalyzer.analyze(image, width, height)
-                        },
-                        // A confirmed Network Defense run owns even obscured/loading frames. The
-                        // generic title detector otherwise mistakes the battle HUD or an opened
-                        // skill card for "Touch to Start" and taps the centre card repeatedly.
-                        FrameProbe(FrameOwner.GAME_ENTRY, enabled = FrameProbePolicy.allowGenericGameEntry(
-                            featureFrame = featureFrame,
-                            networkDefenseSessionActive = NetworkDefenseFrameAnalyzer.isSessionActive(),
-                            worldSearchCalibrated = CaptureFrameAnalyzer.isCalibrated,
-                            worldSearchSessionActive = DwsExcursionRequest.active(),
-                            digiCopilotOwns = digiCopilotOwns,
-                            awaitingFarm = BondCycleTimer.awaitingFarm(),
-                            rewardSequenceActive = de.robinthor.digiworldexplorer.purchase.RewardPurchaseFrameAnalyzer.isSequenceActive(),
-                        )) {
-                            GameEntryAnalyzer.analyze(image, width, height)
-                        },
-                        // Active Network runs inspect every frame because the boss banner is brief.
-                        FrameProbe(FrameOwner.NETWORK_DEFENSE, enabled = networkFrame && !digiCopilotOwns) {
-                            NetworkDefenseFrameAnalyzer.analyze(image, width, height)
-                        },
-                        // A calibrated World Search grid keeps priority over all menu tasks.
-                        FrameProbe(FrameOwner.WORLD_SEARCH, enabled = featureFrame && CaptureFrameAnalyzer.isCalibrated) {
-                            val gridFound = CaptureFrameAnalyzer.analyze(this, image, width, height)?.detected == true
-                            val now = SystemClock.elapsedRealtime()
-                            if (gridFound) {
-                                lastGridRecognized = now
-                                if (AutomationState.autoFeedEnabled) FeedFrameAnalyzer.pauseForDigiWorld()
-                            } else if (lastGridRecognized > 0L && now - lastGridRecognized >= GRID_RELEASE_TIMEOUT) {
-                                android.util.Log.i("DigiWorldCapture", "grid absent for ${now - lastGridRecognized} ms - releasing DigiWorld mode")
-                                CaptureFrameAnalyzer.resetCalibration()
-                                DigiWorldAccessibilityService.instance?.showStatusOnly("", false)
-                                lastGridRecognized = 0L
+
+                            val classicSummon = !digiCopilotOwns && AutomationState.autoPurchaseEnabled && !de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest.ownsFrames()
+
+                            val owner = FrameOrchestrator.withForeground(FrameProbe(FrameOwner.STAGE_FAILED) {
+                                val found = StageFailedFrameAnalyzer.analyze(image, w, h)
+                                if (found) {
+                                    if (de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest.active())
+                                        de.robinthor.digiworldexplorer.dungeon.DungeonRotationAnalyzer.onGrowthGuideHandled()
+                                    else if (AutomationState.autoDungeonEnabled) DungeonFrameAnalyzer.onFailureDialogHandled()
+                                }
+                                found
+                            }) {
+                                if (activeSession != null) {
+                                    FrameOrchestrator.resolve(false, emptyList(), activeSession)
+                                } else if (classicSummon && RewardPurchaseFrameAnalyzer.analyze(image, w, h)) {
+                                    FrameOwner.SUMMON
+                                } else if (de.robinthor.digiworldexplorer.purchase.SummonRewardFrameGuard.analyze(image, w, h)) {
+                                    FrameOwner.SUMMON
+                                } else if (de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest.ownsFrames()) {
+                                    if (featureFrame && de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest.active())
+                                        de.robinthor.digiworldexplorer.dungeon.DungeonRotationAnalyzer.analyze(image, w, h)
+                                    FrameOwner.DUNGEON
+                                } else FrameOrchestrator.resolve(
+                                    false, listOf(
+                                        FrameProbe(FrameOwner.WORLD_SEARCH, enabled = featureFrame && DwsExcursionRequest.active()) { DwsExcursionAnalyzer.analyze(image, w, h) },
+                                        FrameProbe(
+                                            FrameOwner.GAME_ENTRY, enabled = FrameProbePolicy.allowGenericGameEntry(
+                                                featureFrame = featureFrame, networkDefenseSessionActive = NetworkDefenseFrameAnalyzer.isSessionActive(),
+                                                worldSearchCalibrated = CaptureFrameAnalyzer.isCalibrated, worldSearchSessionActive = DwsExcursionRequest.active(),
+                                                digiCopilotOwns = digiCopilotOwns, awaitingFarm = BondCycleTimer.awaitingFarm(),
+                                                rewardSequenceActive = RewardPurchaseFrameAnalyzer.isSequenceActive()
+                                            )
+                                        ) { GameEntryAnalyzer.analyze(image, w, h) },
+                                        FrameProbe(FrameOwner.NETWORK_DEFENSE, enabled = networkFrame && !digiCopilotOwns) { NetworkDefenseFrameAnalyzer.analyze(image, w, h) },
+                                        FrameProbe(FrameOwner.WORLD_SEARCH, enabled = featureFrame && CaptureFrameAnalyzer.isCalibrated) {
+                                            val gridFound = CaptureFrameAnalyzer.analyze(this, image, w, h)?.detected == true
+                                            val now = SystemClock.elapsedRealtime()
+                                            if (gridFound) {
+                                                lastGridRecognized = now
+                                                if (AutomationState.autoFeedEnabled) FeedFrameAnalyzer.pauseForDigiWorld()
+                                            } else if (lastGridRecognized > 0L && now - lastGridRecognized >= GRID_RELEASE_TIMEOUT) {
+                                                CaptureFrameAnalyzer.resetCalibration()
+                                                DigiWorldAccessibilityService.instance?.showStatusOnly("", false)
+                                                lastGridRecognized = 0L
+                                            }
+                                            gridFound
+                                        },
+                                        FrameProbe(FrameOwner.GEKKOMON_RUN, enabled = AutomationState.autoRunnerEnabled && !digiCopilotOwns) { GekkomonRunFrameAnalyzer.analyze(image, w, h) },
+                                        FrameProbe(FrameOwner.SUMMON, enabled = featureFrame && !digiCopilotOwns && !classicSummon) { RewardPurchaseFrameAnalyzer.analyze(image, w, h) },
+                                        FrameProbe(FrameOwner.FARM, enabled = featureFrame && !DungeonFrameAnalyzer.isSessionActive()) { de.robinthor.digiworldexplorer.automation.BondFarmAnalyzer.analyze(image, w, h) },
+                                        FrameProbe(FrameOwner.DUNGEON, enabled = featureFrame && de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest.active()) { de.robinthor.digiworldexplorer.dungeon.DungeonRotationAnalyzer.analyze(image, w, h) },
+                                        FrameProbe(FrameOwner.DUNGEON, enabled = featureFrame && !digiCopilotOwns && AutomationState.autoDungeonEnabled) { DungeonFrameAnalyzer.analyze(image, w, h) },
+                                        FrameProbe(FrameOwner.FARM, enabled = featureFrame && !DungeonFrameAnalyzer.isSessionActive() && (!digiCopilotOwns || BondCycleTimer.awaitingFarm())) { de.robinthor.digiworldexplorer.farm.FarmHarvestAnalyzer.analyze(image, w, h) },
+                                        FrameProbe(FrameOwner.BOND, enabled = (featureFrame || BondRotationAnalyzer.needsFastPolling()) && !DungeonFrameAnalyzer.isSessionActive()) { BondRotationAnalyzer.analyze(image, w, h) },
+                                        FrameProbe(FrameOwner.BOND, enabled = featureFrame && !DungeonFrameAnalyzer.isSessionActive()) { FeedFrameAnalyzer.analyze(image, w, h) },
+                                        FrameProbe(FrameOwner.WORLD_SEARCH, enabled = !CaptureFrameAnalyzer.isCalibrated && framesSeen % 10 == 0) {
+                                            val found = CaptureFrameAnalyzer.analyze(this, image, w, h)?.detected == true
+                                            if (found) lastGridRecognized = SystemClock.elapsedRealtime()
+                                            found
+                                        },
+                                    )
+                                )
                             }
-                            gridFound
-                        },
-                        FrameProbe(FrameOwner.GEKKOMON_RUN, enabled = AutomationState.autoRunnerEnabled && !digiCopilotOwns) {
-                            GekkomonRunFrameAnalyzer.analyze(image, width, height)
-                        },
-                        // A summon transaction is one visual sequence (menu -> optional prompt ->
-                        // reveal -> result). Keep it ahead of generic blue dungeon/reward probes;
-                        // otherwise the result grid can alternate between SUMMON and DUNGEON.
-                        FrameProbe(FrameOwner.SUMMON, enabled = featureFrame && !digiCopilotOwns && !classicSummon) {
-                            RewardPurchaseFrameAnalyzer.analyze(image, width, height)
-                        },
-                        FrameProbe(FrameOwner.FARM, enabled = featureFrame && !DungeonFrameAnalyzer.isSessionActive()) {
-                            de.robinthor.digiworldexplorer.automation.BondFarmAnalyzer.analyze(image, width, height)
-                        },
-                        FrameProbe(FrameOwner.DUNGEON, enabled = featureFrame && de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest.active()) {
-                            de.robinthor.digiworldexplorer.dungeon.DungeonRotationAnalyzer.analyze(image, width, height)
-                        },
-                        FrameProbe(FrameOwner.DUNGEON, enabled = featureFrame && !digiCopilotOwns &&
-                            AutomationState.autoDungeonEnabled) {
-                            DungeonFrameAnalyzer.analyze(image, width, height)
-                        },
-                        FrameProbe(FrameOwner.FARM, enabled = featureFrame && !DungeonFrameAnalyzer.isSessionActive() &&
-                            (!digiCopilotOwns || BondCycleTimer.awaitingFarm())) {
-                            de.robinthor.digiworldexplorer.farm.FarmHarvestAnalyzer.analyze(image, width, height)
-                        },
-                        FrameProbe(FrameOwner.BOND, enabled = (featureFrame || BondRotationAnalyzer.needsFastPolling()) &&
-                            !DungeonFrameAnalyzer.isSessionActive()) {
-                            de.robinthor.digiworldexplorer.feed.BondRotationAnalyzer.analyze(image, width, height)
-                        },
-                        FrameProbe(FrameOwner.BOND, enabled = featureFrame && !DungeonFrameAnalyzer.isSessionActive()) {
-                            FeedFrameAnalyzer.analyze(image, width, height)
-                        },
-                        // Initial calibration runs only after no specialized task claimed the frame.
-                        FrameProbe(FrameOwner.WORLD_SEARCH, enabled = !CaptureFrameAnalyzer.isCalibrated && framesSeen % 10 == 0) {
-                            val found = CaptureFrameAnalyzer.analyze(this, image, width, height)?.detected == true
-                            if (found) lastGridRecognized = SystemClock.elapsedRealtime()
-                            found
-                        },
-                    ))
+
+                            if (owner != lastFrameOwner) {
+                                AutomationEventLog.record(AutomationEventKind.OWNER_CHANGED, "${lastFrameOwner.name}:${owner.name}")
+                                lastFrameOwner = owner
+                            }
+
+                            if (owner == FrameOwner.BOND && BondRotationAnalyzer.ownsSession()) {
+                                passiveScreen = BondRotationAnalyzer.observedScreen
+                            } else if (owner in setOf(FrameOwner.NONE, FrameOwner.BOND) && featureFrame) {
+                                passiveScreen = PassiveScreenClassifier.detect(image, w, h)
+                            } else if (owner != FrameOwner.NONE) passiveScreen = ObservedScreen.UNKNOWN
+
+                            if (featureFrame || owner != FrameOwner.NONE) {
+                                if (owner == FrameOwner.BOND && featureFrame) {
+                                    publishDirector(passiveScreen)
+                                } else if (owner == FrameOwner.FARM && de.robinthor.digiworldexplorer.automation.BondFarmAnalyzer.screen in setOf(ObservedScreen.HOME, ObservedScreen.EXPLORE_MENU)) {
+                                    publishDirector(de.robinthor.digiworldexplorer.automation.BondFarmAnalyzer.screen)
+                                } else if (owner == FrameOwner.NONE) publishDirector(passiveScreen) else publishDirector(owner)
+                            }
+                            recognized = owner != FrameOwner.NONE || passiveScreen != ObservedScreen.UNKNOWN
+                        }
+
+                        if (recognized) markContentRecognized() else checkRecognitionTimeouts()
                     }
-                    if (owner != lastFrameOwner) {
-                        AutomationEventLog.record(AutomationEventKind.OWNER_CHANGED, "${lastFrameOwner.name}:${owner.name}")
-                        if (owner == FrameOwner.DUNGEON || lastFrameOwner == FrameOwner.DUNGEON || owner == FrameOwner.CAPTURE_BLOCKED)
-                            de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.requestScreenshot("owner-${lastFrameOwner.name}-${owner.name}")
-                        lastFrameOwner = owner
-                    }
-                    // Publish the owner's observation or a read-only fallback. Independent
-                    // modulo schedules must not invent UNKNOWN between successful feature scans.
-                    if (owner == FrameOwner.BOND && BondRotationAnalyzer.ownsSession()) {
-                        // Reuse the owner's observation for display. Running the full passive
-                        // classifier again duplicates geometry scans and can disagree with it.
-                        // This cached display state never authorizes a gesture.
-                        passiveScreen = BondRotationAnalyzer.observedScreen
-                    } else if (owner in setOf(FrameOwner.NONE, FrameOwner.BOND) && featureFrame) {
-                        passiveScreen = PassiveScreenClassifier.detect(image, width, height)
-                    } else if (owner != FrameOwner.NONE) passiveScreen = ObservedScreen.UNKNOWN
-                    if (featureFrame || owner != FrameOwner.NONE) {
-                    if (owner == FrameOwner.BOND && featureFrame) {
-                        publishDirector(passiveScreen)
-                    } else if (owner == FrameOwner.BOND) {
-                        // No fresh scan: do not overwrite the last observation with the task name.
-                    } else if (owner == FrameOwner.FARM && de.robinthor.digiworldexplorer.automation.BondFarmAnalyzer.screen in
-                        setOf(ObservedScreen.HOME, ObservedScreen.EXPLORE_MENU)) {
-                        publishDirector(de.robinthor.digiworldexplorer.automation.BondFarmAnalyzer.screen)
-                    } else if (owner == FrameOwner.NONE) publishDirector(passiveScreen) else publishDirector(owner)
-                    }
-                    recognized = owner != FrameOwner.NONE || passiveScreen != ObservedScreen.UNKNOWN
                 }
-                de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.captureIfRequested(image, width, height)
-                if (recognized) markContentRecognized() else checkRecognitionTimeouts()
-                }
-            } }.onFailure {
+            }.onFailure {
                 resetGeometry()
-                android.util.Log.w("DigiWorldCapture","Frame discarded while capture changed",it)
-                de.robinthor.digiworldexplorer.diagnostics.PersistentDiagnosticLog.record("GEOMETRY.FRAME_REJECTED",it.javaClass.simpleName)
+                android.util.Log.w("DigiWorldCapture", "Frame discarded while capture changed", it)
             }
         }, Handler(thread.looper))
         return reader
@@ -535,7 +542,6 @@ class ScreenCaptureService : Service() {
             healthyCaptureSince = 0L
             if (badCaptureSince == 0L) badCaptureSince = now
             if (now - badCaptureSince >= MISSING_IMAGE_CONFIRMATION) {
-                if (!captureImageMissing) android.util.Log.w("DigiWorldCapture", "missing game image quality=${result.quality} mean=${result.meanLuma} deviation=${result.lumaDeviation} chroma=${result.meanChroma}")
                 captureImageMissing = true
                 DigiWorldAccessibilityService.instance?.showStatusOnly(getString(R.string.overlay_no_capture_image))
             }
@@ -548,9 +554,9 @@ class ScreenCaptureService : Service() {
         captureImageMissing = false
         healthyCaptureSince = 0L
         DigiWorldAccessibilityService.instance?.showStatusOnly("", false)
-        android.util.Log.i("DigiWorldCapture", "structured game image recovered")
         return false
     }
+
     private fun markContentRecognized() {
         lastRecognizedContent = SystemClock.elapsedRealtime()
         missingStatusShown = false
@@ -577,25 +583,16 @@ class ScreenCaptureService : Service() {
         val missingFor = SystemClock.elapsedRealtime() - lastRecognizedContent
         if (missingFor >= GRID_HIDE_TIMEOUT && !missingStatusShown) {
             missingStatusShown = true
-            // Unknown is useful Director information, not a reason to make the status UI vanish.
             DigiWorldAccessibilityService.instance?.updateDirector(ScreenDirector.snapshot())
         }
         if (missingFor >= IDLE_STOP_TIMEOUT) {
-            // A long loading screen, announcement chain, battle transition, or temporarily
-            // missing Bond bubble is normal while the game is in front. Stopping projection
-            // here makes the overlay look alive while no frames are being analysed anymore.
-            // Keep the session alive in-game; the user can still stop it explicitly and the
-            // idle timeout remains useful after leaving the game.
             if (DigiWorldAccessibilityService.instance?.isGameForeground() == true) return
-            val boundedTaskActive = de.robinthor.digiworldexplorer.automation.DigiCopilotRequest.active() ||
-                de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest.ownsFrames() ||
-                de.robinthor.digiworldexplorer.automation.DwsExcursionRequest.active() ||
-                de.robinthor.digiworldexplorer.automation.HomeIdleRewardRequest.active()
-            if (boundedTaskActive) {
-                // These controllers own explicit per-step deadlines. Black/loading frames during
-                // stage changes must not kill MediaProjection and the whole multi-step run.
-                return
-            }
+            val boundedTaskActive = DigiCopilotRequest.active() ||
+                    de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest.ownsFrames() ||
+                    DwsExcursionRequest.active() ||
+                    HomeIdleRewardRequest.active()
+            if (boundedTaskActive) return
+
             idleStopRequested = true
             Handler(Looper.getMainLooper()).post {
                 AutomationState.stop()
@@ -607,11 +604,14 @@ class ScreenCaptureService : Service() {
 
     private fun releaseCapture() {
         shuttingDown = true
-        resetGeometry();frameScratch=null;observedGeneration=-1L
-        geometryPendingSince=0L
+        resetGeometry()
+        frameScratch = null
+        observedGeneration = -1L
+        geometryPendingSince = 0L
         getSystemService(DisplayManager::class.java).unregisterDisplayListener(displayListener)
         AutomationEventLog.record(AutomationEventKind.CAPTURE_STOPPED, "CAPTURE_STOPPED")
         CaptureSessionState.markCaptureStopped()
+
         virtualDisplay?.release()
         virtualDisplay = null
         imageReader?.close()
@@ -626,6 +626,7 @@ class ScreenCaptureService : Service() {
         lastGridRecognized = 0L
         lastFrameOwner = FrameOwner.NONE
         passiveScreen = ObservedScreen.UNKNOWN
+
         RewardPurchaseFrameAnalyzer.reset()
         de.robinthor.digiworldexplorer.purchase.SummonRewardFrameGuard.reset()
         GameEntryAnalyzer.reset()
@@ -633,15 +634,16 @@ class ScreenCaptureService : Service() {
         GekkomonRunFrameAnalyzer.reset()
         de.robinthor.digiworldexplorer.farm.FarmHarvestAnalyzer.reset()
         de.robinthor.digiworldexplorer.automation.BondFarmAnalyzer.reset()
-        de.robinthor.digiworldexplorer.automation.HomeIdleRewardAnalyzer.reset()
-        de.robinthor.digiworldexplorer.automation.DwsExcursionAnalyzer.reset()
+        HomeIdleRewardAnalyzer.reset()
+        DwsExcursionAnalyzer.reset()
         NetworkDefenseFrameAnalyzer.reset()
         FeedFrameAnalyzer.reset()
-        de.robinthor.digiworldexplorer.feed.BondRotationAnalyzer.reset()
+        BondRotationAnalyzer.reset()
         StageFailedFrameAnalyzer.reset()
         ScreenDirector.reset()
         lastDirectorSnapshot = ScreenDirector.snapshot()
         CaptureFrameAnalyzer.resetCalibration()
+
         val activeProjection = projection
         projection = null
         activeProjection?.unregisterCallback(projectionCallback)
@@ -714,9 +716,6 @@ class ScreenCaptureService : Service() {
 
         fun setAutomation(context: Context, enabled: Boolean) {
             context.startService(Intent(context, ScreenCaptureService::class.java).setAction(if (enabled) ACTION_AUTO_ON else ACTION_AUTO_OFF))
-            // startService queues onStartCommand. A consent caller starts its requested
-            // Dungeon/Copilot mode immediately afterwards, so publish the accepted start
-            // now rather than letting that request see the previous disabled state.
             if (enabled) AutomationState.enabled = true
         }
 

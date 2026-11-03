@@ -8,13 +8,14 @@ import android.view.WindowManager
 /** Same Android display source for capture allocation and final input validation. */
 object PhysicalDisplay {
     @Suppress("DEPRECATION")
-    fun bounds(context:Context,legacy:Boolean=false):PixelRect {
-        val manager=context.getSystemService(WindowManager::class.java)
-        if(Build.VERSION.SDK_INT>=30 && !legacy) {
-            val b=manager.maximumWindowMetrics.bounds
-            return PixelRect(b.left,b.top,b.right,b.bottom)
+    fun bounds(context: Context, legacy: Boolean = false): PixelRect {
+        val manager = context.getSystemService(WindowManager::class.java)
+        // Penyesuaian Android 9 (API 28): Fallback penuh ke DisplayMetrics jika SDK < 30
+        if (Build.VERSION.SDK_INT >= 30 && !legacy) {
+            val b = manager.maximumWindowMetrics.bounds
+            return PixelRect(b.left, b.top, b.right, b.bottom)
         }
-        val metrics=DisplayMetrics().also {manager.defaultDisplay.getRealMetrics(it)}
-        return PixelRect(0,0,metrics.widthPixels,metrics.heightPixels)
+        val metrics = DisplayMetrics().also { manager.defaultDisplay.getRealMetrics(it) }
+        return PixelRect(0, 0, metrics.widthPixels, metrics.heightPixels)
     }
 }
