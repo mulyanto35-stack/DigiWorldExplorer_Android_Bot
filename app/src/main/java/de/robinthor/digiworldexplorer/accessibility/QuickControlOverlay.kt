@@ -1,14 +1,16 @@
 package de.robinthor.digiworldexplorer.accessibility
 
+import android.animation.ObjectAnimator
 import android.content.Context
 import android.content.Intent
-import android.animation.ObjectAnimator
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
-import android.os.SystemClock
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
+import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -22,32 +24,34 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.Switch
 import android.widget.TextView
-import de.robinthor.digiworldexplorer.MainActivity
 import de.robinthor.digiworldexplorer.CaptureConsentActivity
+import de.robinthor.digiworldexplorer.MainActivity
 import de.robinthor.digiworldexplorer.R
+import de.robinthor.digiworldexplorer.automation.DirectorSnapshot
 import de.robinthor.digiworldexplorer.capture.CaptureFrameAnalyzer
 import de.robinthor.digiworldexplorer.capture.CaptureSessionState
+import de.robinthor.digiworldexplorer.capture.PixelRect
 import de.robinthor.digiworldexplorer.capture.ScreenCaptureService
 import de.robinthor.digiworldexplorer.dungeon.DungeonFrameAnalyzer
 import de.robinthor.digiworldexplorer.dungeon.DungeonRotationRequest
 import de.robinthor.digiworldexplorer.feed.FeedFrameAnalyzer
 import de.robinthor.digiworldexplorer.feed.StageFailedFrameAnalyzer
-import de.robinthor.digiworldexplorer.license.SupporterLicenseManager
 import de.robinthor.digiworldexplorer.network.NetworkDefenseFrameAnalyzer
 import de.robinthor.digiworldexplorer.purchase.RewardPurchaseFrameAnalyzer
 import de.robinthor.digiworldexplorer.strategy.AutoMoveController
 import de.robinthor.digiworldexplorer.strategy.AutomationState
-import de.robinthor.digiworldexplorer.automation.DirectorSnapshot
 import kotlin.math.abs
 
-/** Small user-controlled overlay. The full-screen grid remains non-touchable. */
+/** Overlay kecil yang dikontrol pengguna untuk Android 9+. */
 class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
-    /** Only opaque/touchable controls, never the transparent full-screen grid window. */
-    fun occupiedBounds():List<de.robinthor.digiworldexplorer.capture.PixelRect> = listOfNotNull(root,copilotBadge).mapNotNull { view ->
-        if(view.visibility!=View.VISIBLE || !view.isAttachedToWindow || view.width<=0 || view.height<=0)return@mapNotNull null
-        val location=IntArray(2);view.getLocationOnScreen(location)
-        de.robinthor.digiworldexplorer.capture.PixelRect(location[0],location[1],location[0]+view.width,location[1]+view.height)
+
+    fun occupiedBounds(): List<PixelRect> = listOfNotNull(root, copilotBadge).mapNotNull { view ->
+        if (view.visibility != View.VISIBLE || !view.isAttachedToWindow || view.width <= 0 || view.height <= 0) return@mapNotNull null
+        val location = IntArray(2)
+        view.getLocationOnScreen(location)
+        PixelRect(location[0], location[1], location[0] + view.width, location[1] + view.height)
     }
+
     private val windowManager = service.getSystemService(WindowManager::class.java)
     private val preferences = service.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private var root: LinearLayout? = null
@@ -88,6 +92,7 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
             else -> lastScreenLabel
         }
     }
+
     private var directorCard: View? = null
     private var directorTail: View? = null
     private var eyeStatus: BotEyeStatusView? = null
@@ -99,6 +104,17 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
     private var dungeonSpinner: ProgressBar? = null
     private var copilotControl: Button? = null
     private var copilotSpinner: ProgressBar? = null
+
+    // Fungsi pembantu untuk mengambil batas layar yang aman pada Android 9 (API 28)
+    private fun getScreenBounds(): Rect {
+        return if (Build.VERSION.SDK_INT >= 30) {
+            windowManager.maximumWindowMetrics.bounds
+        } else {
+            @Suppress("DEPRECATION")
+            val metrics = DisplayMetrics().also { windowManager.defaultDisplay.getRealMetrics(it) }
+            Rect(0, 0, metrics.widthPixels, metrics.heightPixels)
+        }
+    }
 
     fun show() {
         if (root != null) return
@@ -125,12 +141,12 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
         }
         val eyes = BotEyeStatusView(service).apply {
             isClickable = false
-            // The source ImageView has elevation; keep animated eyes above that bitmap.
             elevation = 12f * density
             layoutParams = FrameLayout.LayoutParams((52 * density).toInt(), (52 * density).toInt())
         }
         val iconStack = FrameLayout(service).apply {
-            addView(icon); addView(eyes)
+            addView(icon)
+            addView(eyes)
             layoutParams = LinearLayout.LayoutParams((52 * density).toInt(), (52 * density).toInt())
         }
         val title = TextView(service).apply {
@@ -189,15 +205,15 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            val screenHeight = if (Build.VERSION.SDK_INT >= 30) windowManager.maximumWindowMetrics.bounds.height()
-                else service.resources.displayMetrics.heightPixels
+            val bounds = getScreenBounds()
             x = preferences.getInt("quick_overlay_x", (8 * density).toInt())
-            y = preferences.getInt("quick_overlay_y", (screenHeight * .15f).toInt())
+            y = preferences.getInt("quick_overlay_y", (bounds.height() * .15f).toInt())
         }
         val cardVisible = preferences.getBoolean("director_card_visible", true)
         statusCard.visibility = if (showDirectorCard(cardVisible, DungeonRotationRequest.ownsFrames(),
             de.robinthor.digiworldexplorer.automation.DigiCopilotRequest.active())) View.VISIBLE else View.GONE
         tail.visibility = statusCard.visibility
+        
         installDragAndClick(iconStack, layoutParams, onLongPress = {
             val visible = !preferences.getBoolean("director_card_visible", true)
             preferences.edit().putBoolean("director_card_visible", visible).apply()
@@ -205,6 +221,7 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
             root?.requestLayout()
         }) { togglePanel(layoutParams) }
         installDragAndClick(statusCard, layoutParams) { }
+
         root = container
         panel = menu
         bubble = iconStack
@@ -215,6 +232,7 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
         directorTail = tail
         eyeStatus = eyes
         params = layoutParams
+        
         runCatching { windowManager.addView(container, layoutParams) }
         installCopilotBadge(density, layoutParams)
         refresh()
@@ -267,10 +285,9 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
         val arrow = ImageView(service).apply {
             setImageResource(R.drawable.ic_copilot_rotation)
             scaleType = ImageView.ScaleType.FIT_CENTER
-            // Animation may start before layout. Measure the center explicitly, avoiding
-            // a cached zero-size corner pivot and font baseline wobble.
-            addOnLayoutChangeListener { view,left,top,right,bottom,_,_,_,_ ->
-                view.pivotX=(right-left)/2f;view.pivotY=(bottom-top)/2f
+            addOnLayoutChangeListener { view, left, top, right, bottom, _, _, _, _ ->
+                view.pivotX = (right - left) / 2f
+                view.pivotY = (bottom - top) / 2f
             }
         }
         val label = TextView(service).apply {
@@ -283,16 +300,16 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
         val badgeHeader = LinearLayout(service).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            addView(arrow, LinearLayout.LayoutParams((16*density).toInt(),(16*density).toInt()))
+            addView(arrow, LinearLayout.LayoutParams((16 * density).toInt(), (16 * density).toInt()))
             addView(label)
         }
         val phase = TextView(service).apply {
-            textSize=8f
-            setTextColor(Color.rgb(210,177,255))
-            gravity=Gravity.CENTER
-            maxLines=1
-            ellipsize=android.text.TextUtils.TruncateAt.END
-            includeFontPadding=false
+            textSize = 8f
+            setTextColor(Color.rgb(210, 177, 255))
+            gravity = Gravity.CENTER
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            includeFontPadding = false
         }
         val badge = LinearLayout(service).apply {
             orientation = LinearLayout.VERTICAL
@@ -303,8 +320,8 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
                 cornerRadius = 9 * density
                 setStroke((1 * density).toInt().coerceAtLeast(1), Color.rgb(176, 103, 245))
             }
-            addView(badgeHeader,LinearLayout.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT,(18*density).toInt()))
-            addView(phase,LinearLayout.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT,(11*density).toInt()))
+            addView(badgeHeader, LinearLayout.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT, (18 * density).toInt()))
+            addView(phase, LinearLayout.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT, (11 * density).toInt()))
             visibility = View.GONE
         }
         val badgeParams = WindowManager.LayoutParams(
@@ -316,7 +333,6 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            // Android 12+ rejects pass-through touches beneath opaque untrusted overlays.
             alpha = .75f
             x = anchor.x
             y = anchor.y + (54 * density).toInt()
@@ -337,9 +353,7 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
     private fun moveCopilotBadge(anchor: WindowManager.LayoutParams) {
         val badge = copilotBadge ?: return
         val params = copilotBadgeParams ?: return
-        val bounds = if (Build.VERSION.SDK_INT >= 30) windowManager.maximumWindowMetrics.bounds
-            else android.graphics.Rect(0, 0, service.resources.displayMetrics.widthPixels,
-                service.resources.displayMetrics.heightPixels)
+        val bounds = getScreenBounds()
         val density = service.resources.displayMetrics.density
         params.x = anchor.x.coerceIn(0, (bounds.width() - params.width).coerceAtLeast(0))
         val below = anchor.y + (54 * density).toInt()
@@ -398,10 +412,10 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
             service.setQuickControlsEnabled(false)
         }, LinearLayout.LayoutParams(0, (40 * density).toInt(), 1f).apply { marginStart = (3 * density).toInt() })
         addView(topRow)
+        
+        // Cek Lisensi Dihapus: Selalu mengizinkan aktivasi Dungeon Copilot
         addView(statefulAutomationButton("dungeon", density) {
-            if (SupporterLicenseManager.load(service) == null) {
-                service.showStatusOnly(service.getString(R.string.quick_beta_code_required))
-            } else if (!AutomationState.enabled) {
+            if (!AutomationState.enabled) {
                 requestCaptureAndStart(CaptureConsentActivity.START_DUNGEON)
             } else if (DungeonRotationRequest.ownsFrames()) {
                 DungeonRotationRequest.cancel()
@@ -413,10 +427,12 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
             updateAutomationControls()
             collapse()
         }, LinearLayout.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT, (40 * density).toInt()).apply { topMargin = (4 * density).toInt() })
+
         addView(buildDigiCopilotSection(density), LinearLayout.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = (4 * density).toInt() })
+
         val startRow = LinearLayout(service).apply { orientation = LinearLayout.HORIZONTAL }
         startRow.addView(actionButton(service.getString(R.string.quick_start_restart)) {
             if (CaptureSessionState.snapshot(AutomationState.enabled).captureActive) reloadAutomation() else requestCaptureAndStart()
@@ -444,10 +460,10 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
             cornerRadius = 12 * density
             setStroke((2 * density).toInt().coerceAtLeast(2), Color.rgb(255, 190, 45))
         }
+        
+        // Cek Lisensi Dihapus: Selalu mengizinkan aktivasi DigiCopilot
         addView(statefulAutomationButton("copilot", density) {
-            if (SupporterLicenseManager.load(service) == null) {
-                service.showStatusOnly(service.getString(R.string.quick_beta_code_required))
-            } else if (!AutomationState.enabled) {
+            if (!AutomationState.enabled) {
                 requestCaptureAndStart(CaptureConsentActivity.START_COPILOT)
             } else {
                 if (de.robinthor.digiworldexplorer.automation.DigiCopilotRequest.active()) {
@@ -480,6 +496,7 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
             updateAutomationControls()
             collapse()
         }, LinearLayout.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT, (40 * density).toInt()))
+
         addView(TextView(service).apply {
             text = service.getString(R.string.quick_copilot_modules)
             textSize = 10f
@@ -532,41 +549,27 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
                 RewardPurchaseFrameAnalyzer.reset()
             }
             "auto_dungeon" -> {
-                val allowed = enabled
-                AutomationState.autoDungeonEnabled = allowed
-                if (allowed != enabled) preferences.edit().putBoolean(preferenceKey, allowed).apply()
+                AutomationState.autoDungeonEnabled = enabled
                 DungeonFrameAnalyzer.reset()
-                featureSwitches[preferenceKey]?.isChecked = allowed
             }
             "auto_feed" -> {
                 AutomationState.autoFeedEnabled = enabled
                 FeedFrameAnalyzer.reset()
             }
             "auto_farm_harvest" -> {
-                val allowed = enabled && SupporterLicenseManager.load(service) != null
-                AutomationState.autoFarmEnabled = allowed
-                if (allowed != enabled) preferences.edit().putBoolean(preferenceKey, allowed).apply()
+                // Lisensi tidak lagi dibatasi
+                AutomationState.autoFarmEnabled = enabled
                 de.robinthor.digiworldexplorer.farm.FarmHarvestAnalyzer.reset()
-                featureSwitches[preferenceKey]?.isChecked = allowed
             }
             "copilot_dws" -> {
-                val allowed = enabled && SupporterLicenseManager.load(service) != null
-                AutomationState.copilotDwsEnabled = allowed
-                if (allowed != enabled) preferences.edit().putBoolean(preferenceKey, allowed).apply()
-                featureSwitches[preferenceKey]?.isChecked = allowed
+                AutomationState.copilotDwsEnabled = enabled
             }
             "copilot_rewards" -> {
-                val allowed = enabled && SupporterLicenseManager.load(service) != null
-                AutomationState.copilotRewardsEnabled = allowed
-                if (allowed != enabled) preferences.edit().putBoolean(preferenceKey, allowed).apply()
-                featureSwitches[preferenceKey]?.isChecked = allowed
+                AutomationState.copilotRewardsEnabled = enabled
             }
             "auto_bond_rotation" -> {
-                val allowed = enabled && SupporterLicenseManager.load(service) != null
-                AutomationState.autoBondRotationEnabled = allowed
-                if (allowed != enabled) preferences.edit().putBoolean(preferenceKey, allowed).apply()
+                AutomationState.autoBondRotationEnabled = enabled
                 de.robinthor.digiworldexplorer.feed.BondRotationAnalyzer.reset()
-                featureSwitches[preferenceKey]?.isChecked = allowed
             }
             "auto_network_defense" -> {
                 AutomationState.autoNetworkDefenseEnabled = enabled
@@ -579,13 +582,13 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
     private fun refreshFeatureSwitches() {
         syncingFeatureSwitches = true
         featureSwitches["auto_purchase"]?.isChecked = preferences.getBoolean("auto_purchase", false)
-        val supporter = SupporterLicenseManager.load(service) != null
         featureSwitches["auto_dungeon"]?.isChecked = preferences.getBoolean("auto_dungeon", false)
         featureSwitches["auto_feed"]?.isChecked = preferences.getBoolean("auto_feed", false)
-        featureSwitches["auto_bond_rotation"]?.isChecked = supporter && preferences.getBoolean("auto_bond_rotation", true)
-        featureSwitches["auto_farm_harvest"]?.isChecked = supporter && preferences.getBoolean("auto_farm_harvest", true)
-        featureSwitches["copilot_rewards"]?.isChecked = supporter && preferences.getBoolean("copilot_rewards", true)
-        featureSwitches["copilot_dws"]?.isChecked = supporter && preferences.getBoolean("copilot_dws", true)
+        // Cek SupporterLicense dihilangkan agar switch tidak ter-uncheck otomatis
+        featureSwitches["auto_bond_rotation"]?.isChecked = preferences.getBoolean("auto_bond_rotation", true)
+        featureSwitches["auto_farm_harvest"]?.isChecked = preferences.getBoolean("auto_farm_harvest", true)
+        featureSwitches["copilot_rewards"]?.isChecked = preferences.getBoolean("copilot_rewards", true)
+        featureSwitches["copilot_dws"]?.isChecked = preferences.getBoolean("copilot_dws", true)
         featureSwitches["auto_network_defense"]?.isChecked = preferences.getBoolean("auto_network_defense", false)
         syncingFeatureSwitches = false
     }
@@ -645,7 +648,6 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
     }
 
     private fun reloadAutomation() {
-        val supporter = SupporterLicenseManager.load(service) != null
         AutomationState.mode = de.robinthor.digiworldexplorer.automation.AutomationMode.fromPreference(
             preferences.getString("automation_mode", null))
         AutomationState.farmWateringEnabled = preferences.getBoolean("farm_watering", true)
@@ -656,13 +658,17 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
         AutomationState.autoDungeonEnabled = preferences.getBoolean("auto_dungeon", false)
         AutomationState.autoNetworkDefenseEnabled = preferences.getBoolean("auto_network_defense", false)
         AutomationState.autoFeedEnabled = preferences.getBoolean("auto_feed", false)
-        AutomationState.autoBondRotationEnabled = supporter && preferences.getBoolean("auto_bond_rotation", true)
-        AutomationState.copilotRewardsEnabled = supporter && preferences.getBoolean("copilot_rewards", true)
-        AutomationState.copilotDwsEnabled = supporter && preferences.getBoolean("copilot_dws", true)
-        AutomationState.autoFarmEnabled = supporter && preferences.getBoolean("auto_farm_harvest", true)
+        
+        // Pengecekan supporter dilepas (dianggap selalu true)
+        AutomationState.autoBondRotationEnabled = preferences.getBoolean("auto_bond_rotation", true)
+        AutomationState.copilotRewardsEnabled = preferences.getBoolean("copilot_rewards", true)
+        AutomationState.copilotDwsEnabled = preferences.getBoolean("copilot_dws", true)
+        AutomationState.autoFarmEnabled = preferences.getBoolean("auto_farm_harvest", true)
+        
         AutomationState.dwsNavigationSettings =
             de.robinthor.digiworldexplorer.strategy.DwsNavigationProfile.fromPreferenceForAccess(
-                preferences.getString("dws_profile", null), supporter).settings()
+                preferences.getString("dws_profile", null), true).settings()
+        
         RewardPurchaseFrameAnalyzer.reset()
         DungeonFrameAnalyzer.reset()
         NetworkDefenseFrameAnalyzer.reset()
@@ -671,6 +677,7 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
         StageFailedFrameAnalyzer.reset()
         CaptureFrameAnalyzer.resetCalibration()
         AutoMoveController.reset()
+        
         service.showStatusOnly(service.getString(R.string.quick_reloaded))
         if (CaptureSessionState.snapshot(AutomationState.enabled).captureActive) {
             AutomationState.enabled = true
@@ -750,13 +757,7 @@ class QuickControlOverlay(private val service: DigiWorldAccessibilityService) {
 
     private fun keepExpandedMenuOnScreen(layoutParams: WindowManager.LayoutParams) {
         root?.post {
-            val bounds = if (Build.VERSION.SDK_INT >= 30) {
-                windowManager.maximumWindowMetrics.bounds
-            } else {
-                @Suppress("DEPRECATION")
-                val metrics = android.util.DisplayMetrics().also { windowManager.defaultDisplay.getRealMetrics(it) }
-                android.graphics.Rect(0, 0, metrics.widthPixels, metrics.heightPixels)
-            }
+            val bounds = getScreenBounds()
             val width = root?.measuredWidth ?: 0
             val height = root?.measuredHeight ?: 0
             layoutParams.x = layoutParams.x.coerceIn(0, (bounds.width() - width).coerceAtLeast(0))

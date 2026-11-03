@@ -12,33 +12,56 @@ import de.robinthor.digiworldexplorer.automation.BotEyeStateResolver
 import de.robinthor.digiworldexplorer.automation.DirectorSnapshot
 import kotlin.math.sin
 
-/** Animated mascot eyes: closed/off, green/active, yellow/search, gray/unknown, red/error. */
+/** Mascot animatif: OFF, ACTIVE (hijau), COPILOT (ungu), SEARCHING (kuning), UNKNOWN (abu-abu), ERROR (merah). */
 class BotEyeStatusView(context: Context) : View(context) {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    // Dioptimalkan: Alokasi tunggal untuk Paint guna menghindari alokasi memori di onDraw
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+
     private val handler = Handler(Looper.getMainLooper())
     private var eyeState = BotEyeState.UNKNOWN
     private var frame = 0
+
     private val animate = object : Runnable {
         override fun run() {
-            if (!isAttachedToWindow || !eyeState.animated) return
+            if (!isAttachedToWindow || windowVisibility != VISIBLE || !eyeState.animated) return
             frame = (frame + 1) % 24
             invalidate()
             handler.postDelayed(this, eyeState.frameDelay)
         }
     }
 
+    init {
+        // Android 9: Gunakan Hardware Layer untuk rendering bentuk geometris yang cepat & lancar
+        setLayerType(LAYER_TYPE_HARDWARE, null)
+    }
+
     fun update(value: DirectorSnapshot) {
         val next = BotEyeStateResolver.resolve(value)
-        if (next != eyeState) frame = 0
-        eyeState = next
+        if (next != eyeState) {
+            frame = 0
+            eyeState = next
+            // Matikan akselerasi jika state diam untuk menghemat konsumsi daya pada Android 9
+            if (eyeState.animated) {
+                setLayerType(LAYER_TYPE_HARDWARE, null)
+            } else {
+                setLayerType(LAYER_TYPE_NONE, null)
+            }
+        }
         handler.removeCallbacks(animate)
-        if (eyeState.animated) handler.postDelayed(animate, eyeState.frameDelay)
+        if (eyeState.animated && isAttachedToWindow && windowVisibility == VISIBLE) {
+            handler.postDelayed(animate, eyeState.frameDelay)
+        }
         invalidate()
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        if (eyeState.animated) handler.postDelayed(animate, eyeState.frameDelay)
+        if (eyeState.animated && windowVisibility == VISIBLE) {
+            handler.removeCallbacks(animate)
+            handler.postDelayed(animate, eyeState.frameDelay)
+        }
     }
 
     override fun onDetachedFromWindow() {
@@ -46,30 +69,43 @@ class BotEyeStatusView(context: Context) : View(context) {
         super.onDetachedFromWindow()
     }
 
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        if (visibility == VISIBLE && eyeState.animated) {
+            handler.removeCallbacks(animate)
+            handler.postDelayed(animate, eyeState.frameDelay)
+        } else {
+            handler.removeCallbacks(animate)
+        }
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val d = resources.displayMetrics.density
-        // The source mascot's pupils sit slightly above the geometric icon centre.
         val cy = 24f * d
         val left = 20f * d
         val right = 32f * d
-        paint.style = Paint.Style.FILL
 
         if (eyeState == BotEyeState.OFF) {
-            // Cover the pupils baked into the icon so the OFF state is actually visible.
-            paint.color = Color.argb(245, 7, 16, 25)
-            canvas.drawOval(left-6f*d, cy-4.4f*d, left+6f*d, cy+4.4f*d, paint)
-            canvas.drawOval(right-6f*d, cy-4.4f*d, right+6f*d, cy+4.4f*d, paint)
-            paint.color = Color.rgb(135, 145, 158)
-            paint.strokeWidth = 3.2f * d
-            paint.strokeCap = Paint.Cap.ROUND
-            canvas.drawLine(left - 3f*d, cy, left + 3f*d, cy, paint)
-            canvas.drawLine(right - 3f*d, cy, right + 3f*d, cy, paint)
+            fillPaint.color = Color.argb(245, 7, 16, 25)
+            canvas.drawOval(left - 6f * d, cy - 4.4f * d, left + 6f * d, cy + 4.4f * d, fillPaint)
+            canvas.drawOval(right - 6f * d, cy - 4.4f * d, right + 6f * d, cy + 4.4f * d, fillPaint)
+
+            strokePaint.color = Color.rgb(135, 145, 158)
+            strokePaint.strokeWidth = 3.2f * d
+            strokePaint.strokeCap = Paint.Cap.ROUND
+            canvas.drawLine(left - 3f * d, cy, left + 3f * d, cy, strokePaint)
+            canvas.drawLine(right - 3f * d, cy, right + 3f * d, cy, strokePaint)
             return
         }
 
         val blink = eyeState in setOf(BotEyeState.ACTIVE, BotEyeState.COPILOT) && frame in 20..21
-        val radiusY = when { blink -> .55f*d; eyeState == BotEyeState.UNKNOWN -> 2.7f*d; else -> 4.7f*d }
+        val radiusY = when {
+            blink -> .55f * d
+            eyeState == BotEyeState.UNKNOWN -> 2.7f * d
+            else -> 4.7f * d
+        }
+
         val color = when (eyeState) {
             BotEyeState.ACTIVE -> Color.rgb(55, 224, 143)
             BotEyeState.COPILOT -> Color.rgb(191, 105, 255)
@@ -78,37 +114,41 @@ class BotEyeStatusView(context: Context) : View(context) {
             BotEyeState.ERROR -> Color.rgb(239, 74, 82)
             BotEyeState.OFF -> Color.TRANSPARENT
         }
-        // Opaque sockets mask the original cyan icon eyes; the animated state is drawn on top.
-        paint.color = Color.argb(250, 5, 12, 22)
-        canvas.drawOval(left-6f*d, cy-radiusY, left+6f*d, cy+radiusY, paint)
-        canvas.drawOval(right-6f*d, cy-radiusY, right+6f*d, cy+radiusY, paint)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 1.2f*d
-        paint.color = Color.argb(220, Color.red(color), Color.green(color), Color.blue(color))
-        canvas.drawOval(left-6f*d, cy-radiusY, left+6f*d, cy+radiusY, paint)
-        canvas.drawOval(right-6f*d, cy-radiusY, right+6f*d, cy+radiusY, paint)
-        paint.style = Paint.Style.FILL
+
+        // Gambar soket luar mata
+        fillPaint.color = Color.argb(250, 5, 12, 22)
+        canvas.drawOval(left - 6f * d, cy - radiusY, left + 6f * d, cy + radiusY, fillPaint)
+        canvas.drawOval(right - 6f * d, cy - radiusY, right + 6f * d, cy + radiusY, fillPaint)
+
+        // Gambar outline mata
+        strokePaint.strokeWidth = 1.2f * d
+        strokePaint.color = Color.argb(220, Color.red(color), Color.green(color), Color.blue(color))
+        canvas.drawOval(left - 6f * d, cy - radiusY, left + 6f * d, cy + radiusY, strokePaint)
+        canvas.drawOval(right - 6f * d, cy - radiusY, right + 6f * d, cy + radiusY, strokePaint)
+
         if (blink) return
 
-        val xOffset = if (eyeState == BotEyeState.SEARCHING) ((frame % 3) - 1) * 3.5f*d else 0f
+        // Animasi posisi pupil & ukuran lingkaran mata
+        val xOffset = if (eyeState == BotEyeState.SEARCHING) ((frame % 3) - 1) * 3.5f * d else 0f
         val radius = when (eyeState) {
-            BotEyeState.ERROR -> (2.25f + .55f * ((sin(frame*.8) + 1.0) / 2.0)).toFloat()
+            BotEyeState.ERROR -> (2.25f + .55f * ((sin(frame * .8) + 1.0) / 2.0)).toFloat()
             BotEyeState.ACTIVE, BotEyeState.COPILOT -> 3.25f
             BotEyeState.UNKNOWN -> 2.7f
             BotEyeState.SEARCHING -> 3.25f
             BotEyeState.OFF -> 0f
         } * d
-        paint.color = color
-        canvas.drawCircle(left+xOffset, cy, radius, paint)
-        canvas.drawCircle(right+xOffset, cy, radius, paint)
 
+        fillPaint.color = color
+        canvas.drawCircle(left + xOffset, cy, radius, fillPaint)
+        canvas.drawCircle(right + xOffset, cy, radius, fillPaint)
+
+        // Indikator garis alis marah saat ERROR
         if (eyeState == BotEyeState.ERROR) {
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = 1.5f*d
-            paint.strokeCap = Paint.Cap.ROUND
-            canvas.drawLine(left-4f*d, cy-6f*d, left+3f*d, cy-4.5f*d, paint)
-            canvas.drawLine(right-3f*d, cy-4.5f*d, right+4f*d, cy-6f*d, paint)
-            paint.style = Paint.Style.FILL
+            strokePaint.strokeWidth = 1.5f * d
+            strokePaint.strokeCap = Paint.Cap.ROUND
+            strokePaint.color = color
+            canvas.drawLine(left - 4f * d, cy - 6f * d, left + 3f * d, cy - 4.5f * d, strokePaint)
+            canvas.drawLine(right - 3f * d, cy - 4.5f * d, right + 4f * d, cy - 6f * d, strokePaint)
         }
     }
 
